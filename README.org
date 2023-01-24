@@ -1,0 +1,10 @@
+#+title: prrequaestor
+
+A quaestor for pull requests.
+
+Have a process that needs to be audited for changes?
+
+Use prrequaestor to automatically create pull requests
+for easy review and visibility.
+* Common Lisp
+* Emacs Lisp
