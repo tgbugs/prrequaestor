@@ -70,7 +70,8 @@
            ))
 
 (in-package :prcl)
-(defvar *pr-branch-prefix* "automated-")
+(defvar *pr-branch-prefix-default* "automated-")
+(defvar *pr-branch-prefix* nil)
 (defvar *push-pr* nil)
 (defvar *repos* (make-hash-table)) ; repos by name
 (defvar *oa-secrets* "~/ni/dev/secrets.sxpr") ; FIXME abstract path
@@ -95,6 +96,7 @@
   (defvar *do-not-clone* nil
     "if set do not clone during `with-repo' setup"))
 
+(defvar *git-raise-error* nil)
 (defvar *sepstr* (make-string 70 :initial-element #\-))
 
 (defun executables () ; stupidly inefficient
@@ -257,18 +259,23 @@
     (setf (gethash (repo-id repo) *repos*) repo)))
 
 ;(defparameter magit-credentials-hook nil)
-(defun get-latest-automated-pr-branch (repo &key ((:prefix prefix) *pr-branch-prefix*))
+(defun get-latest-automated-pr-branch (repo &key ((:prefix prefix)))
   ; TODO
-  (let (out)
+  (let ((prefix (or prefix *pr-branch-prefix* *pr-branch-prefix-default*))
+        out)
+    ;;(format t "prefix: ~a ~a ~a~%" prefix *pr-branch-prefix* *pr-branch-prefix-default*)
     (loop for pr in (repo-pull-requests repo)
                                         ;(assoc :title pr)
                                         ;(assoc :base pr)
           ;; TODO sort by date
           until (let ((ref (cdr
                             (assoc :ref (cdr (assoc :head pr))))))
-                  (format *standard-output* "fooing refs: ~s~%" ref)
-                  (when (uiop:string-prefix-p prefix ref)
-                    (setf out ref))))
+                  ;;(format *standard-output* "pr ref: ~s~%" ref)
+                  (if (uiop:string-prefix-p prefix ref)
+                      (progn
+                        (format *standard-output* "ref ok match: ~s~%" ref)
+                        (setf out ref))
+                      (format *standard-output* "ref no match: ~s~%" ref))))
     out))
 
 (defun forge-get-repository (something)
@@ -285,7 +292,7 @@
     (declare (ignore response-headers))
     (declare (ignore response-uri))
     (declare (ignore stream))
-    (print status)
+    (format t "get-json status: ~a~%" status)
     (if (eq status 200)
         #+(and would have to define constructors for the return object for this to work correctly)
         (cl-json:with-decoder-simple-clos-semantics (cl-json:decode-json-from-string body))
@@ -367,9 +374,6 @@
   )
 
 (defun github-create-pull-request (title body &key source target)
-  ;; XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-  ;; TODO TODO this is the next thing that needs to be implemented in order to
-  ;; complete the port from elisp to sbcl
   (let* ((source (or source (git-get-upstream-branch (git-get-current-branch))))
          ;; XXX warning, ensure we push creating a new branch
          (target (or target (git-get-upstream-branch (git-master-branch))))
@@ -392,20 +396,23 @@
          (head-branch (cdr head)))
     ;; head source
     ;; base target
-    (dex:post
-          uri
-          :headers
-          `(("Accept" . "application/vnd.github.shadow-cat-preview+json") ; Support draft pull-requests.
-            ("Authorization" . ,(concatenate 'string "token " *github-token*)))
-          :content
-          `(("title" . ,title)
-            ("body" . ,body)
-            ("base" . ,base-branch)
-            ("head" . ,(if (string= head-remote base-remote)
-                         head-branch
-                         (concatenate 'string (repo-owner head-repo) ":" head-branch)))
-            ("draft" . "true")
-            ("maintainer_can_modify" . "true")))
+    (let ((resp
+            (dex:post
+             uri
+             :headers
+             `(("Accept" . "application/vnd.github.shadow-cat-preview+json") ; Support draft pull-requests.
+               ("Authorization" . ,(concatenate 'string "token " *github-token*)))
+             :content
+             (cl-json:encode-json-to-string
+              `(("title" . ,title)
+                ("body" . ,body)
+                ("base" . ,base-branch)
+                ("head" . ,(if (string= head-remote base-remote)
+                               head-branch
+                               (concatenate 'string (repo-owner head-repo) ":" head-branch)))
+                ("draft" . t)
+                ("maintainer_can_modify" . t))))))
+      resp)
 
     ;; see `ghub-request' for full details
     #+()
@@ -532,6 +539,11 @@ from nil.")
     #+()
     (when *current-git-output-port*
       (format *current-git-output-port* "git output for git ~a:~%~a" args (get-output-stream-string out)))
+    (when (and *git-raise-error* (not (= 0 (sb-ext:process-exit-code process))))
+      (error (format nil "git ~a failed with status ~s~%"
+                     args
+                     (sb-ext:process-exit-code process)
+                     )))
     (values (get-output-stream-string out) process)))
 
 (defun git-master-branch ()
@@ -642,7 +654,8 @@ from nil.")
   (run-git "commit" "-m" message))
 
 (defun git-config (&rest key-elems)
-  (let ((key (format nil "~{~A~^.~}" key-elems)))
+  (let ((*git-raise-error* nil) ; config returns 1 if key not found which isn't an error in this case
+        (key (format nil "~{~A~^.~}" key-elems)))
     ;;(format t key)
     (split-string-nl
      (run-git "config" key))))
@@ -802,7 +815,7 @@ go back to wherever we were before
        ((:fn command-fun))
        old-branch
        new-branch
-       ((:prefix branch-prefix-string) *pr-branch-prefix*) ; TODO
+       ((:prefix branch-prefix-string))
        ;;(:branch old-branch)
        ;;(:branch new-branch)
        ((:diff diff-pattern) ".")
@@ -814,8 +827,8 @@ go back to wherever we were before
     (with-repo ; repo-id ; XXX possibly bad design but we don't need repo-id because cl is not hygenic ...
       ; :no-clone t
       (repo-forge-fill-values *current-repo*)
-                                        ;(forge-get-repo-prs repo-id)
-      (let* ((pr-already-exists (get-latest-automated-pr-branch *current-repo* :prefix branch-prefix-string))
+      (let* ((branch-prefix-string (or *pr-branch-prefix* branch-prefix-string *pr-branch-prefix-default*))
+             (pr-already-exists (get-latest-automated-pr-branch *current-repo* :prefix branch-prefix-string))
              (parent-branch-or-existing (or pr-already-exists old-branch (git-master-branch)))
              (target-branch (or new-branch (concatenate 'string branch-prefix-string *build-id*))))
         (format t "pr-already-exists: ~s~%" pr-already-exists)
@@ -835,32 +848,37 @@ go back to wherever we were before
         (let* ((files-changed (git-diff diff-pattern))
                (files-to-add (funcall get-add-files files-changed)))
           (format t ":changed ~a :add ~a~%" files-changed files-to-add)
-          (when files-to-add
-            (format t "adding ...~%    ~{~a~^~%    ~}" files-to-add)
-            (unless pr-already-exists
-              (git-checkout-create target-branch)) ; checkout first so failsafe on branch
-            (git-add files-to-add)
-            (git-commit (format nil "~a~%~%~a" pr-title (or pr-body "")))
-            (format t "~a~%~a~%~a~%" *sepstr* (git-log-p-n-1) *sepstr*)
-            (unless pr-already-exists
-              (format t "checking for api token ...~%")
-              (setf *github-token* (ensure-token-exists)))
-            (format t "token found ...~%")
-            (when *push-pr*
-              (format t "pushing ...~%")
-              (git-push)
-              (unless pr-already-exists
-                (format t "creating pull request ...~%")
-                (github-create-pull-request pr-title pr-body
-                                            :target (git-get-upstream-branch parent-branch-or-existing))
-                ;; TODO print link to pull request so if run by human they can click
-                )
-              ;; note that we only run checkout back to master when
-              ;; running for real when in pretend mode 99% of the time
-              ;; the user will want the repo on the new branch
-              (format t "checking out ~a branch ...~%" (git-master-branch))
-              ;; TODO might need to stash again?
-              (run-git "checkout" (git-master-branch))))))))
+          (if files-to-add
+              (progn
+                (format t "adding ...~%    ~{~a~^~%    ~}~%" files-to-add) ; last ~% avoids wierd error print
+                (unless pr-already-exists
+                  (git-checkout-create target-branch)) ; checkout first so failsafe on branch
+                (git-add files-to-add)
+                (git-commit (format nil "~a~%~%~a" pr-title (or pr-body "")))
+                (format t "~a~%~a~%~a~%" *sepstr* (git-log-p-n-1) *sepstr*)
+                (unless pr-already-exists
+                  (format t "checking for api token ...~%")
+                  (setf *github-token* (ensure-token-exists)))
+                (format t "token found ...~%")
+                (when *push-pr*
+                  (format t "pushing ...~%")
+                  (git-push)
+                  (unless pr-already-exists
+                    (format t "creating pull request ...~%")
+                    (github-create-pull-request
+                     pr-title
+                     pr-body
+                     :target (git-get-upstream-branch parent-branch-or-existing))
+                    ;; TODO print link to pull request so if run by human they can click
+                    )
+                  ;; note that we only run checkout back to master when
+                  ;; running for real when in pretend mode 99% of the time
+                  ;; the user will want the repo on the new branch
+                  (format t "checking out ~a branch ...~%" (git-master-branch))
+                  ;; TODO might need to stash again?
+                  (run-git "checkout" (git-master-branch)))
+                nil)
+              (format t "no files changed ...~%"))))))
 
 ;(macroexpand
  (defun main (&key fun)
@@ -876,7 +894,10 @@ go back to wherever we were before
      ((:debug) debug)
      ;; dynamic sync
      ((:specs *sync-specs*) *sync-specs*) ; path to elisp file with sync defs
-     ((:fun fun) cli-current-sync))
+     ((:fun fun) cli-current-sync)
+     ;; pull request info
+     ((:pr-branch-prefix nil) pr-branch-prefix) ; override defsync :prefix
+     )
     (declare (ignore parse-args::cases parse-args::returns parse-args::parsed))
     (format *standard-output* "argv: ~A~%" sb-ext:*posix-argv*)
     (format *standard-output* "~S~%"
@@ -890,10 +911,13 @@ go back to wherever we were before
              :oas *oa-secrets*
              :ss *sync-specs*
              :ccs cli-current-sync
+             :bpr pr-branch-prefix
              ))
     (let ((*auth-sources* (or (and auth-source (cons auth-source *auth-sources*)) *auth-sources*))
           (*build-dir* (uiop:ensure-directory-pathname cli-build-dir)) ; SIGH
           (*current-git-output-port* (when debug *standard-output*))
+          (*pr-branch-prefix* pr-branch-prefix)
+          (*git-raise-error* t)
           *current-sync*)
       (ensure-directories-exist *build-dir*)
       (if (or (and *sync-specs* cli-current-sync) (uiop:string-prefix-p "test" cli-current-sync))
@@ -963,3 +987,4 @@ go back to wherever we were before
 ;; (prcl:main :fun "test")
 ;; bin/prcl --fun test --debug --resume --build-dir /tmp/test-prcl-build-dir
 ;; bin/prcl --fun test --debug --resume --build-dir /tmp/test-prcl-build-dir --specs ~/ni/sparc/sync-specs.lisp
+;; bin/prcl --fun test-2 --debug --resume --build-dir /tmp/test-prcl-build-dir --specs ~/ni/sparc/sync-specs.lisp --pr-branch-prefix auto-test-
