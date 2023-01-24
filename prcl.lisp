@@ -1,5 +1,15 @@
 ;; -*- mode: Common-Lisp -*-
 
+;; there are at least three ways to use this file
+
+;; run it in emacs via slime (you may need to run the `ql:quickload's first)
+
+;; run it from cli via
+;; sbcl --script prcl.lisp --specs path/to/sync-specs.lisp --fun test
+
+;; or slad and run the executable directly via prcl-build.lisp
+;; ./prcl-build.lisp; bin/prcl --specs path/to/sync-specs.lisp --fun test
+
 ;; TODO see if we can use cl-git
 
 (in-package :cl-user)
@@ -84,6 +94,8 @@
 (eval-when (:execute :load-toplevel :compile-toplevel)
   (defvar *do-not-clone* nil
     "if set do not clone during `with-repo' setup"))
+
+(defvar *sepstr* (make-string 70 :initial-element #\-))
 
 (defun executables () ; stupidly inefficient
   (loop with path = (uiop:getenv "PATH")
@@ -468,7 +480,7 @@
 
 (defvar *subprocess-environment* nil
   "A special variable that works like elisp PROCESS-ENVIRONMENT
-except that it only work for code that uses WITH-COMMAND-PROCESS
+except that it only works for code that uses WITH-COMMAND-PROCESS
 (such as RUN-COMMAND). The default value should never be changed
 from nil.")
 
@@ -757,9 +769,6 @@ go back to wherever we were before
            (*repo-just-cloned* just-cloned))
        ,@body)))
 
-(unless (boundp '+sepstr+)
-  (defconstant +sepstr+ (make-string 70 :initial-element #\-)))
-
 (defun file-name-with-extension (path extension)
   (concatenate 'string (uiop:split-name-type path) "." extension))
 
@@ -832,7 +841,7 @@ go back to wherever we were before
               (git-checkout-create target-branch)) ; checkout first so failsafe on branch
             (git-add files-to-add)
             (git-commit (format nil "~a~%~%~a" pr-title (or pr-body "")))
-            (format t "~a~%~a~%~a~%" +sepstr+ (git-log-p-n-1) +sepstr+)
+            (format t "~a~%~a~%~a~%" *sepstr* (git-log-p-n-1) *sepstr*)
             (unless pr-already-exists
               (format t "checking for api token ...~%")
               (setf *github-token* (ensure-token-exists)))
@@ -861,19 +870,10 @@ go back to wherever we were before
      ((:resume) resume) ; start from results of a pretend run ; TODO implement this
      ;; paths
      ((:build-dir *build-dir*) cli-build-dir)
-                                        ;((:user-emacs-directory nil) cli-ued)
-                                        ;((:user-init-file nil) cli-uif)
      ((:auth-source nil) auth-source) ; pass an additional path to add to `auth-sources'
      ((:secrets *oa-secrets*) *oa-secrets*)
      ;; debug
      ((:debug) debug)
-                                        ;(:debug-on-quit)
-     ;; commands -- sync command options
-     ;;(sync)
-     ;;(apinat)
-     ;;(nif) (npo) (scr) (sct) (slim) ; XXX fun but incompatible with arbitrary sync names
-     ;;(test)
-
      ;; dynamic sync
      ((:specs *sync-specs*) *sync-specs*) ; path to elisp file with sync defs
      ((:fun fun) cli-current-sync))

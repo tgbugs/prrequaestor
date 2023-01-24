@@ -360,7 +360,7 @@
   ;; defsync is called inside another function instead of
   ;; at top level?
   (unless (boundp 'something-or-other)
-    (user-error "don't call this beofre `something-or-other' is bound")
+    (user-error "don't call this before `something-or-other' is bound")
     )
   '
   (lambda ()
