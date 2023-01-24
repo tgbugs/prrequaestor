@@ -6,5 +6,50 @@ Have a process that needs to be audited for changes?
 
 Use prrequaestor to automatically create pull requests
 for easy review and visibility.
-* Common Lisp
-* Emacs Lisp
+
+* Overview
+We want to automatically synchronize changes from a variety of data
+sources to a git repo so that other people can review them.
+* Workflow
+The parts of the workflow for prrequaestor.
+
+#+begin_src lisp :eval never
+(sync repo@state-n) -> repo@state-n+1
+(branch auto repo@state-n+1) -> repo@auto
+(push repo@auto remote@auto)
+(pull-request forge remote@auto upstream@leaf)
+#+end_src
+
+The components are
+- repositories ~repo~, ~remote~, and ~upstream~
+- repository states ~state-n~, and ~state-n+1~
+- repository state histories ~leaf~, and ~auto~
+- processes ~sync~, ~branch~, ~push~, and ~pull-request~
+- shared collaboration spaces ~forge~
+
+We want to run a process to ~sync~ the state of a local ~repo~ so that
+it reflects external changes.
+
+Running ~sync~ transforms the ~repo~ from ~state-n~ to ~state-n+1~.
+
+We want other people to review changes in the ~forge~.
+
+Therefore we ~branch~ a new history from ~leaf~ at ~commit-n~
+to ~auto~ at ~state-n+1~ and ~push~ ~repo@auto~ to ~remote@auto~.
+
+Finally we ~pull-request~ from ~remote@auto~ to ~upstream@leaf~.
+
+Note that ~remote~ and ~upstream~ may be the same repository.
+
+* Implementations
+** Common Lisp
+The maintained implementation. SBCL with ~save-lisp-and-die~ provides
+a better environment for scripting and interaction with the many other
+runtimes that actually carry out the transformations on git
+repositories.
+** Emacs Lisp
+The initial prototype implementation was in elisp, but due to the
+complexity of the setup and due to bugs in Emacs with threads and
+processes that I originally discovered working on this project and
+have not had time to resolve, the CL implementation is now the primary
+implementation.
