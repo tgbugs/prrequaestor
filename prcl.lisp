@@ -7,16 +7,16 @@
 ;(ql:quickload 'cl-ppcre)
 ;(ql:quickload 'github-api-cl)
 ;(ql:quickload 'drakma)
-;(drakma:get-content-type) ; fewer deps than dex
+;(drakma:get-content-type) ; fewer deps than dex but missing features
 
 #-asdf
-(load #p"/usr/share/common-lisp/source/asdf/build/asdf.lisp")
+(load #p"/usr/share/common-lisp/source/asdf/build/asdf.lisp") ; FIXME gentoo specific
 
 #-uiop
-(asdf:load-asd #p"/usr/share/common-lisp/systems/uiop.asd")
+(asdf:load-asd #p"/usr/share/common-lisp/systems/uiop.asd") ; FIXME gentoo specific
 
 #-quicklisp
-(let ((quicklisp-init (merge-pathnames "code/lisp/quicklisp/setup.lisp"
+(let ((quicklisp-init (merge-pathnames "code/lisp/quicklisp/setup.lisp" ; FIXME abstract path
                                        (user-homedir-pathname))))
   (when (probe-file quicklisp-init)
     (load quicklisp-init)))
@@ -25,8 +25,10 @@
 #-dumped-image (ql:quickload 'dexador)
 #-dumped-image (ql:quickload 'cl-json)
 #-dumped-image (ql:quickload 'quri)
-#-dumped-image (push #p"~/git/git-share/" asdf:*central-registry*)
-#-dumped-image (asdf:load-system 'parse-args)
+#-dumped-image (asdf:initialize-source-registry
+                '(:source-registry (:tree #p"~/git/git-share/") ; FIXME abstract path
+                  :inherit-configuration))
+#-dumped-image (asdf:load-system :parse-args)
 
 ;#+sbcl
 ;(setf sb-ext:*on-package-variance* '(:warn nil :error nil))
@@ -61,7 +63,7 @@
 (defvar *pr-branch-prefix* "automated-")
 (defvar *push-pr* nil)
 (defvar *repos* (make-hash-table)) ; repos by name
-(defvar *oa-secrets* "~/ni/dev/secrets.sxpr") ; FIXME
+(defvar *oa-secrets* "~/ni/dev/secrets.sxpr") ; FIXME abstract path
 (defvar *auth-sources* nil)
 (defvar *authinfo-order* '(:host :port :user :secret))
 (defvar *repo-working-dir* nil)
@@ -97,7 +99,7 @@
 
 (setf *auth-sources*
       '(
-        "~/ni/dev/.authinfo"
+        "~/ni/dev/.authinfo" ; FIXME abstract path
         #+()
         "~/git/orthauth/test/configs/authinfo-1"
         ))
@@ -957,9 +959,7 @@ go back to wherever we were before
 #-(or swank dumped-image) ; this is a hack that only sort of works
 (main)
 
-
-
 ;; test
 ;; (prcl:main :fun "test")
 ;; bin/prcl --fun test --debug --resume --build-dir /tmp/test-prcl-build-dir
-;; bin/prcl --fun test --debug --resume --build-dir /tmp/test-prcl-build-dir --specs /home/tom/ni/sparc/sync-specs.lisp
+;; bin/prcl --fun test --debug --resume --build-dir /tmp/test-prcl-build-dir --specs ~/ni/sparc/sync-specs.lisp
