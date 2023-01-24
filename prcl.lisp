@@ -19,6 +19,8 @@
 ;(ql:quickload 'drakma)
 ;(drakma:get-content-type) ; fewer deps than dex but missing features
 
+#-(or swank dumped-image) (pushnew :debug *features*) ; enable debug if running sbcl --script basically
+
 #-asdf
 (load #p"/usr/share/common-lisp/source/asdf/build/asdf.lisp") ; FIXME gentoo specific
 
@@ -33,6 +35,7 @@
 
 #-dumped-image (ql:quickload 'local-time)
 #-dumped-image (ql:quickload 'dexador)
+;;#-dumped-image (ql:quickload 'cl-git)
 #-dumped-image (ql:quickload 'cl-json)
 #-dumped-image (ql:quickload 'quri)
 #-dumped-image (asdf:initialize-source-registry
@@ -259,9 +262,8 @@
     (setf (gethash (repo-id repo) *repos*) repo)))
 
 ;(defparameter magit-credentials-hook nil)
-(defun get-latest-automated-pr-branch (repo &key ((:prefix prefix)))
-  ; TODO
-  ; FIXME we also need to match pushed but not pr-ed branches
+(defun get-latest-automated-pr-branch (repo &key prefix)
+  ;; FIXME make sure the pull request is open!
   (let ((prefix (or prefix *pr-branch-prefix* *pr-branch-prefix-default*))
         out)
     ;;(format t "prefix: ~a ~a ~a~%" prefix *pr-branch-prefix* *pr-branch-prefix-default*)
@@ -278,6 +280,17 @@
                         (setf out ref))
                       (format *standard-output* "ref no match: ~s~%" ref))))
     out))
+
+(defun git-latest-automated-branch (&key prefix remote)
+  "a real remote branch, may or may not have a pull request"
+  (format t "glab: ~a ~a ~a~%" prefix remote (git-list-remote-branch-names :remote remote))
+  (car
+   (sort
+    (loop
+      for branch in (git-list-remote-branch-names :remote remote)
+      when (search prefix branch)
+        collect branch)
+    #'string>)))
 
 (defun forge-get-repository (something)
   ;; it seem that this works based on context
@@ -367,13 +380,6 @@
 
     ))
 
-(defun local-branch-names ()
-  '("master") ; TODO
-  )
-(defun list-remotes ()
-  '("origin") ; TODO
-  )
-
 (defun github-create-pull-request (title body &key source target)
   (let* ((source (or source (git-get-upstream-branch (git-get-current-branch))))
          ;; XXX warning, ensure we push creating a new branch
@@ -442,9 +448,15 @@
     (with-repo
       ;'what
       ;(repo-forge-fill-values *current-repo*)
-      (split-branch-name "origin/patch-1")
-      (split-branch-name "patch-1")
-      (split-branch-name "master")
+        (list
+         (split-branch-name "origin/patch-1")
+         (split-branch-name "patch-1")
+         (split-branch-name "master")
+         (branch-local-name "origin/patch-1")
+         (branch-local-name "origin/no-local-branch")
+         (branch-local-name "nosuchremote/some-branch") ; should be nil and is atm
+         (branch-local-name nil) ; correctly return nil
+         )
       #+() ; this 400 errors because there is not a real branch to create a pull request from
       (github-create-pull-request "test pull requestion creation from prcl" "hello there!")
       )
@@ -573,6 +585,13 @@ from nil.")
                     branch)
                    return (cons remote (cadr (uiop:split-string branch :separator '(#\/)))))))))
 
+(defun branch-local-name (branch)
+  (format t "bln: ~a~%" branch)
+  (let* ((bn (split-branch-name branch))
+         ;;(remote (car bn))
+         (branch (cdr bn)))
+    branch))
+
 #+()
 (let ((foo "~/git/sigh.foo")
       (poop "~/git/sigh.poop/"))
@@ -606,6 +625,8 @@ from nil.")
          (parent (uiop:pathname-parent-directory-pathname dwt))
          (dir-name (car (reverse (pathname-directory dwt)))) ; XXX i cannot fooing believe how fooing insanely broken this poop is
          )
+    #+() ; this does not work due to libgit2/libssh2 credentials issues, we still need git git for clone
+    (cl-git:clone-repository repo-url worktree)
     ;; FIXME probably need to ensure parent exists at some point?
     (call-git "-C" parent "clone" repo-url dir-name)))
 
@@ -640,6 +661,9 @@ from nil.")
 
 (defun git-list-local-branch-names ()
   (split-string-nl (run-git "for-each-ref" "--format" "%(refname:short)" "refs/heads")))
+
+(defun git-list-remote-branch-names (&key remote)
+  (split-string-nl (run-git "for-each-ref" "--format" "%(refname:short)" (concatenate 'string "refs/remotes" (and remote "/") remote))))
 
 (defun git-log-p-n-1 ()
   (run-git "log" "-p" "-n" "1" "--color=always"))
@@ -713,7 +737,9 @@ from nil.")
     (run-git "reset" "--hard" upstream-branch)))
 
 (defun test2 ()
-  (let ((*repo-working-dir* #p"~/git/pyontutils/")) ; fooing trailing slash on paths
+  (let ((*repo-working-dir*
+          #p"~/git/pyontutils/" ; fooing trailing slash on paths
+          ))
     (format t "~s~%"
             (list
                                         ;(git-status)
@@ -726,6 +752,8 @@ from nil.")
              (git-primary-remote)
              (ensure-token-exists)
              (git-get-upstream-branch)
+             (git-list-local-branch-names)
+             (git-list-remote-branch-names)
              #+()
              (git-ls-others)))))
 
@@ -828,13 +856,22 @@ go back to wherever we were before
     (with-repo ; repo-id ; XXX possibly bad design but we don't need repo-id because cl is not hygenic ...
       ; :no-clone t
       (repo-forge-fill-values *current-repo*)
-      (let* ((branch-prefix-string (or *pr-branch-prefix* branch-prefix-string *pr-branch-prefix-default*))
-             (pr-already-exists (get-latest-automated-pr-branch *current-repo* :prefix branch-prefix-string))
-             (parent-branch-or-existing (or pr-already-exists old-branch (git-master-branch)))
+      (let* ((source-branch (or old-branch (git-master-branch)))
+             (branch-prefix-string (or *pr-branch-prefix* branch-prefix-string *pr-branch-prefix-default*))
+             (pr-already-exists (get-latest-automated-pr-branch
+                                 *current-repo*
+                                 :prefix branch-prefix-string))
+             (latest-remote-auto-branch (branch-local-name
+                                         (git-latest-automated-branch
+                                          :prefix branch-prefix-string
+                                          :remote (car (split-branch-name
+                                                        (git-get-upstream-branch source-branch))))))
+             (parent-branch-or-existing (or pr-already-exists latest-remote-auto-branch source-branch))
              (target-branch (or new-branch (concatenate 'string branch-prefix-string *build-id*))))
         (format t "pr-already-exists: ~s~%" pr-already-exists)
+        (format t "latest-remote-auto-branch: ~s~%" latest-remote-auto-branch)
         (if *repo-just-cloned*
-            (when pr-already-exists
+            (when (or pr-already-exists latest-remote-auto-branch)
               (run-git "checkout" parent-branch-or-existing))
             (progn
               (format t "stash and pull ...~%")
@@ -852,7 +889,7 @@ go back to wherever we were before
           (if files-to-add
               (progn
                 (format t "adding ...~%    ~{~a~^~%    ~}~%" files-to-add) ; last ~% avoids wierd error print
-                (unless pr-already-exists
+                (unless (or pr-already-exists latest-remote-auto-branch)
                   (git-checkout-create target-branch)) ; checkout first so failsafe on branch
                 (git-add files-to-add)
                 (git-commit (format nil "~a~%~%~a" pr-title (or pr-body "")))
@@ -882,66 +919,66 @@ go back to wherever we were before
               (format t "no files changed ...~%"))))))
 
 ;(macroexpand
- (defun main (&key fun)
-   (parse-args:cli-gen
-    (((:current-build-id (make-build-id)) *build-id*) ; set `current-build-id' from cli if needed
-     ((:push-pr) *push-pr*)
-     ((:resume) resume) ; start from results of a pretend run ; TODO implement this
-     ;; paths
-     ((:build-dir *build-dir*) cli-build-dir)
-     ((:auth-source nil) auth-source) ; pass an additional path to add to `auth-sources'
-     ((:secrets *oa-secrets*) *oa-secrets*)
-     ;; debug
-     ((:debug) debug)
-     ;; dynamic sync
-     ((:specs *sync-specs*) *sync-specs*) ; path to elisp file with sync defs
-     ((:fun fun) cli-current-sync)
-     ;; pull request info
-     ((:pr-branch-prefix nil) pr-branch-prefix) ; override defsync :prefix
-     )
-    (declare (ignore parse-args::cases parse-args::returns parse-args::parsed))
-    (format *standard-output* "argv: ~A~%" sb-ext:*posix-argv*)
-    (format *standard-output* "~S~%"
-            (list
-             :bid *build-id*
-             :ppr *push-pr*
-             :res resume ;|resume|
-             :deb debug ;|debug|
-             :bd cli-build-dir
-             :as auth-source
-             :oas *oa-secrets*
-             :ss *sync-specs*
-             :ccs cli-current-sync
-             :bpr pr-branch-prefix
-             ))
-    (let ((*auth-sources* (or (and auth-source (cons auth-source *auth-sources*)) *auth-sources*))
-          (*build-dir* (uiop:ensure-directory-pathname cli-build-dir)) ; SIGH
-          (*current-git-output-port* (when debug *standard-output*))
-          (*pr-branch-prefix* pr-branch-prefix)
-          (*git-raise-error* t)
-          *current-sync*)
-      (ensure-directories-exist *build-dir*)
-      (if (or (and *sync-specs* cli-current-sync) (uiop:string-prefix-p "test" cli-current-sync))
-        (let ((fun (intern (string-upcase (concatenate 'string "sync-" cli-current-sync)) 'prcl-sync))) ; XXX this probably won't work like in el
-          (when *sync-specs*
-            (in-package :prcl-sync)
-            (load *sync-specs*)
-            (in-package :prcl)
-            ) ; no package safety ...
-          (unless (fboundp fun)
-            (error (format nil "No sync function named: ~s~%" fun)))
-          (setf *current-sync* (intern cli-current-sync))
-          (funcall fun))
-        (when cli-current-sync
-          (format t "unknown sync function ~a~%" cli-current-sync)
-          ;; TODO set exit value
-          (uiop:quit 1)
-          #+()
-          (sb-ext:quit :unix-status 1)))
-      (when *current-sync*
-        (format *standard-output* "~async completed for ~a ~a~%"
-                (if *push-pr* "" "pretend ")
-                *current-sync* *build-id*)))))
+(defun main (&key fun)
+  (parse-args:cli-gen
+   (((:current-build-id (make-build-id)) *build-id*) ; set `current-build-id' from cli if needed
+    ((:push-pr) *push-pr*)
+    ((:resume) resume) ; start from results of a pretend run ; TODO implement this
+    ;; paths
+    ((:build-dir *build-dir*) cli-build-dir)
+    ((:auth-source nil) auth-source) ; pass an additional path to add to `auth-sources'
+    ((:secrets *oa-secrets*) *oa-secrets*)
+    ;; debug
+    ((:debug) debug)
+    ;; dynamic sync
+    ((:specs *sync-specs*) *sync-specs*) ; path to elisp file with sync defs
+    ((:fun fun) cli-current-sync)
+    ;; pull request info
+    ((:pr-branch-prefix nil) pr-branch-prefix) ; override defsync :prefix
+    )
+   (declare (ignore parse-args::cases parse-args::returns parse-args::parsed))
+   (format *standard-output* "argv: ~A~%" sb-ext:*posix-argv*)
+   (format *standard-output* "~S~%"
+           (list
+            :bid *build-id*
+            :ppr *push-pr*
+            :res resume ;|resume|
+            :deb debug ;|debug|
+            :bd cli-build-dir
+            :as auth-source
+            :oas *oa-secrets*
+            :ss *sync-specs*
+            :ccs cli-current-sync
+            :bpr pr-branch-prefix
+            ))
+   (let ((*auth-sources* (or (and auth-source (cons auth-source *auth-sources*)) *auth-sources*))
+         (*build-dir* (uiop:ensure-directory-pathname cli-build-dir)) ; SIGH
+         (*current-git-output-port* (when debug *standard-output*))
+         (*pr-branch-prefix* pr-branch-prefix)
+         (*git-raise-error* t)
+         *current-sync*)
+     (ensure-directories-exist *build-dir*)
+     (if (or (and *sync-specs* cli-current-sync) (uiop:string-prefix-p "test" cli-current-sync))
+         (let ((fun (intern (string-upcase (concatenate 'string "sync-" cli-current-sync)) 'prcl-sync))) ; XXX this probably won't work like in el
+           (when *sync-specs*
+             (in-package :prcl-sync)
+             (load *sync-specs*)
+             (in-package :prcl)
+             ) ; no package safety ...
+           (unless (fboundp fun)
+             (error (format nil "No sync function named: ~s~%" fun)))
+           (setf *current-sync* (intern cli-current-sync))
+           (funcall fun))
+         (when cli-current-sync
+           (format t "unknown sync function ~a~%" cli-current-sync)
+           ;; TODO set exit value
+           (uiop:quit 1)
+           #+()
+           (sb-ext:quit :unix-status 1)))
+     (when *current-sync*
+       (format *standard-output* "~async completed for ~a ~a~%"
+               (if *push-pr* "" "pretend ")
+               *current-sync* *build-id*)))))
 ;)
 
 (in-package :prcl-sync)
@@ -958,15 +995,18 @@ go back to wherever we were before
 (defun sync-test-2 ()
   #+(or debug)
   (format *standard-output* "HAWYEE ??????~%")
-  (let ((new-file "some-file.org"))
+  (let ((*random-state* (make-random-state t)) ; per sbcl manual `*random-state*' inits to same value at start
+        ; note also that this works because `*random-state*' is not initialized with a default value
+        ; which explains some of the issues I've had with dynamic variables in other parts of the file
+        (new-file "some-file.org"))
     (defsync
         :repo 'test-github-api
       :fn (lambda ()
-            (let ((foo (merge-pathnames new-file *repo-working-dir*)))
+            (let ((new-file-path (merge-pathnames new-file *repo-working-dir*)))
               #+(or debug)
-              (format t "ffs: ~s~%" foo)
+              (format t "ffs: ~s~%" new-file-path)
               (with-open-file
-                  (stream foo
+                  (stream new-file-path
                           :direction :output
                           :if-exists :supersede
                           :if-does-not-exist :create)
@@ -978,7 +1018,7 @@ go back to wherever we were before
                           do (setf (aref s i) (code-char (+ 48 (random 10))))
                           finally (return  s))))))
       :get-add-files (lambda (paths) (declare (ignore paths)) (list new-file))
-      :title (format nil "automated pull requst for test-2 sync process at ~a" *build-id*)
+      :title (format nil "automated changes for test-2 sync process at ~a" *build-id*)
       :body "some automated changes"
       )))
 
@@ -996,3 +1036,4 @@ go back to wherever we were before
 ;; bin/prcl --fun test --debug --resume --build-dir /tmp/test-prcl-build-dir
 ;; bin/prcl --fun test --debug --resume --build-dir /tmp/test-prcl-build-dir --specs ~/ni/sparc/sync-specs.lisp
 ;; bin/prcl --fun test-2 --debug --resume --build-dir /tmp/test-prcl-build-dir --specs ~/ni/sparc/sync-specs.lisp --pr-branch-prefix auto-test-
+;; bin/prcl --fun test-2 --debug --resume --build-dir /tmp/test-2-prcl-build-dir --specs ~/ni/sparc/sync-specs.lisp --pr-branch-prefix auto-test-

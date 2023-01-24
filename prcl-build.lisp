@@ -26,8 +26,10 @@ sbcl --load "${0}" --eval "(main)" --quit --end-toplevel-options "${@:1}"; exit
 (defun build ()
   ;(asdf:load-system 'parse-args) ; doesn't work
   (pushnew :dumped-image *features*)
-  (push (uiop:truenamize #p"~/git/prrequaestor/") ql:*local-project-directories*) ; FIXME abstract path
+  #+(and not ready yet)
+  (push (uiop:truenamize #p"~/git/NOFORK/cl-git/") ql:*local-project-directories*) ; need version 2.0.0 ; FIXME abstract path
   (push (uiop:truenamize #p"~/git/git-share/") ql:*local-project-directories*) ; neede for parse args
+  (push (uiop:truenamize #p"~/git/prrequaestor/") ql:*local-project-directories*) ; FIXME abstract path
   ;; can't quickload prcl itself it seems, have to load :prcl/entrypoint which depends on prcl? no? < FALSE
   ;; the issue was that we were doing this inside a function
   (ql:quickload :prcl)

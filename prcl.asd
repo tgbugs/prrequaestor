@@ -9,6 +9,7 @@
   :description "TODO"
   :depends-on ("local-time"
                "dexador"
+               ;;"cl-git" ; libgit2/libssh2 is missing key functionality
                "cl-json"
                "quri"
                "parse-args")
