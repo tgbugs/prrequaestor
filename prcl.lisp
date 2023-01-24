@@ -8,7 +8,7 @@
 ;; sbcl --script prcl.lisp --specs path/to/sync-specs.lisp --fun test
 
 ;; or slad and run the executable directly via prcl-build.lisp
-;; ./prcl-build.lisp; bin/prcl --specs path/to/sync-specs.lisp --fun test
+;; ./prcl-build.lisp && bin/prcl --specs path/to/sync-specs.lisp --fun test
 
 ;; TODO see if we can use cl-git
 
@@ -261,12 +261,13 @@
 ;(defparameter magit-credentials-hook nil)
 (defun get-latest-automated-pr-branch (repo &key ((:prefix prefix)))
   ; TODO
+  ; FIXME we also need to match pushed but not pr-ed branches
   (let ((prefix (or prefix *pr-branch-prefix* *pr-branch-prefix-default*))
         out)
     ;;(format t "prefix: ~a ~a ~a~%" prefix *pr-branch-prefix* *pr-branch-prefix-default*)
     (loop for pr in (repo-pull-requests repo)
-                                        ;(assoc :title pr)
-                                        ;(assoc :base pr)
+          ;;(assoc :title pr)
+          ;;(assoc :base pr)
           ;; TODO sort by date
           until (let ((ref (cdr
                             (assoc :ref (cdr (assoc :head pr))))))
@@ -540,7 +541,7 @@ from nil.")
     (when *current-git-output-port*
       (format *current-git-output-port* "git output for git ~a:~%~a" args (get-output-stream-string out)))
     (when (and *git-raise-error* (not (= 0 (sb-ext:process-exit-code process))))
-      (error (format nil "git ~a failed with status ~s~%"
+      (error (format nil "git ~s failed with status ~s~%"
                      args
                      (sb-ext:process-exit-code process)
                      )))
@@ -846,7 +847,7 @@ go back to wherever we were before
         ;; for safety? or no? we want the repo in the state of the upstream
         ;; branch, not the existing pr-branch probably?
         (let* ((files-changed (git-diff diff-pattern))
-               (files-to-add (funcall get-add-files files-changed)))
+               (files-to-add (and files-changed (funcall get-add-files files-changed)))) ; don't trust callers to not provide a constant function like we did in test-2
           (format t ":changed ~a :add ~a~%" files-changed files-to-add)
           (if files-to-add
               (progn
@@ -969,9 +970,16 @@ go back to wherever we were before
                           :direction :output
                           :if-exists :supersede
                           :if-does-not-exist :create)
-                (format stream "* A new heading~%"))))
+                (format stream "* A new heading~%~a~%"
+                        (loop
+                          with len = 16
+                          with s = (make-string len)
+                          for i below len
+                          do (setf (aref s i) (code-char (+ 48 (random 10))))
+                          finally (return  s))))))
       :get-add-files (lambda (paths) (declare (ignore paths)) (list new-file))
-      :title "random auto pr title"
+      :title (format nil "automated pull requst for test-2 sync process at ~a" *build-id*)
+      :body "some automated changes"
       )))
 
 (export 'sync-test :prcl-sync)
