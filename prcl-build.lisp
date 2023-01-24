@@ -1,0 +1,40 @@
+#!/usr/bin/env -S sbcl --script
+;; -*- mode: Common-Lisp -*-
+
+#| ; -*- mode: Common-Lisp -*-
+sbcl --load "${0}" --eval "(main)" --quit --end-toplevel-options "${@:1}"; exit
+|#
+
+#-asdf
+(load #p"/usr/share/common-lisp/source/asdf/build/asdf.lisp")
+
+#-uiop
+(asdf:load-asd #p"/usr/share/common-lisp/systems/uiop.asd")
+
+#-quicklisp
+(let ((quicklisp-init (merge-pathnames "code/lisp/quicklisp/setup.lisp"
+                                       (user-homedir-pathname))))
+  (when (probe-file quicklisp-init)
+    (load quicklisp-init)))
+
+;; XXX all commands in this must be run at the top level
+;; so that namespaces can be resolved one form at a time
+;; you cannot define a function that both loads and references a namespace
+;; the compiler will barf
+
+(defun build ()
+  ;(asdf:load-system 'parse-args) ; doesn't work
+  (pushnew :dumped-image *features*)
+  (push (uiop:truenamize #p"~/ni/sparc/") ql:*local-project-directories*)
+  (push (uiop:truenamize #p"~/git/git-share/") ql:*local-project-directories*) ; neede for parse args
+  ;; can't quickload prcl itself it seems, have to load :prcl/entrypoint which depends on prcl? no? < FALSE
+  ;; the issue was that we were doing this inside a function
+  (ql:quickload :prcl)
+  (pop ql:*local-project-directories*)
+  (pop ql:*local-project-directories*)
+  (ensure-directories-exist "~/ni/sparc/bin/"))
+
+(build)
+(fmakunbound 'build) ; remove from the image before slad
+;; slad MUST be called after build because prcl package must exist when slad is called
+(save-lisp-and-die "bin/prcl" :toplevel #'prcl:main :executable t :compression t)
