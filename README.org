@@ -10,6 +10,14 @@ for easy review and visibility.
 * Overview
 We want to automatically synchronize changes from a variety of data
 sources to a git repo so that other people can review them.
+
+* sync-specs
+~prrequaestor~ needs to be provided with the path to a file containing
+the specifications for the sync processes that you want to run, along
+with the repos, branches, etc. that you want to run them on. By default
+~prrequaestor~ looks for a file in ~*default-pathname-defaults*~ with
+the name ~sync-specs.lisp~. It also accepts ~--specs~ as a cli option.
+
 * Workflow
 The parts of the workflow for prrequaestor.
 
