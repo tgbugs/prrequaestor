@@ -55,9 +55,16 @@ The maintained implementation. SBCL with ~save-lisp-and-die~ provides
 a better environment for scripting and interaction with the many other
 runtimes that actually carry out the transformations on git
 repositories.
+
+The Common Lisp impl is licensed under the MIT license.
 ** Emacs Lisp
 The initial prototype implementation was in elisp, but due to the
 complexity of the setup and due to bugs in Emacs with threads and
 processes that I originally discovered working on this project and
 have not had time to resolve, the CL implementation is now the primary
 implementation.
+
+The Emacs Lisp impl is licensed under the GPL-3.0-or-later license.
+* License
+- Common Lisp MIT
+- Emacs Lisp GPL-3+
