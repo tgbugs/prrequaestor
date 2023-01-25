@@ -10,6 +10,8 @@
 ;; or slad and run the executable directly via prcl-build.lisp
 ;; ./prcl-build.lisp && bin/prcl --specs path/to/sync-specs.lisp --fun test
 
+;; FIXME add new file if not exists fails in some cases?
+;; FIXME need separate working trees/copies of repos per sync to avoid concurrent syncs using the same repo
 ;; TODO fork to do the git operations as a user without push rights?
 ;; TODO see if we can use cl-git (answer: not quickly, and not completely if with ssh)
 
@@ -616,7 +618,7 @@ from nil.")
   (split-string-nl (run-git "for-each-ref" "--format" "%(refname:short)" (concatenate 'string "refs/remotes" (and remote "/") remote))))
 
 (defun git-log-p-n-1 ()
-  (run-git "log" "-p" "-n" "1" "--color=always"))
+  (run-git "log" "-p" "-n" "1" "--color=always" "--word-diff" "--patience"))
 
 (defun git-checkout-create (branch)
   ;; XXX check this one
@@ -748,6 +750,7 @@ from nil.")
       ; :no-clone t
       (repo-forge-fill-values *current-repo*)
       (let* ((source-branch (or old-branch (git-master-branch)))
+             (_ (run-git "checkout" source-branch)) ; if not (git-master-branch) won't exist will error
              (branch-prefix-string (or *pr-branch-prefix* branch-prefix-string *pr-branch-prefix-default*))
              (pr-already-exists (get-latest-automated-pr-branch
                                  *current-repo*
@@ -775,6 +778,7 @@ from nil.")
         ;; for safety? or no? we want the repo in the state of the upstream
         ;; branch, not the existing pr-branch probably?
         (let* ((files-changed (git-diff diff-pattern))
+               ;; FIXME need to be able to add untracked files becuase files-changed is empty for new files
                (files-to-add (and files-changed (funcall get-add-files files-changed)))) ; don't trust callers to not provide a constant function like we did in test-2
           (format t ":changed ~a :add ~a~%" files-changed files-to-add)
           (if files-to-add
