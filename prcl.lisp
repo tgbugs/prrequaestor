@@ -10,7 +10,8 @@
 ;; or slad and run the executable directly via prcl-build.lisp
 ;; ./prcl-build.lisp && bin/prcl --specs path/to/sync-specs.lisp --fun test
 
-;; TODO see if we can use cl-git
+;; TODO fork to do the git operations as a user without push rights?
+;; TODO see if we can use cl-git (answer: not quickly, and not completely if with ssh)
 
 (in-package :cl-user)
 ; #+() #+() #+()
@@ -43,10 +44,6 @@
                   :inherit-configuration))
 #-dumped-image (asdf:load-system :parse-args)
 
-;#+sbcl
-;(setf sb-ext:*on-package-variance* '(:warn nil :error nil))
-
-;#+()
 (defpackage :prcl
   (:use :cl)
   (:export
@@ -261,19 +258,20 @@
     (repo-remote-fill-values repo)
     (setf (gethash (repo-id repo) *repos*) repo)))
 
-;(defparameter magit-credentials-hook nil)
 (defun get-latest-automated-pr-branch (repo &key prefix)
   ;; FIXME make sure the pull request is open!
   (let ((prefix (or prefix *pr-branch-prefix* *pr-branch-prefix-default*))
         out)
-    ;;(format t "prefix: ~a ~a ~a~%" prefix *pr-branch-prefix* *pr-branch-prefix-default*)
+    #+debug
+    (format t "prefix: ~a ~a ~a~%" prefix *pr-branch-prefix* *pr-branch-prefix-default*)
     (loop for pr in (repo-pull-requests repo)
           ;;(assoc :title pr)
           ;;(assoc :base pr)
           ;; TODO sort by date
           until (let ((ref (cdr
                             (assoc :ref (cdr (assoc :head pr))))))
-                  ;;(format *standard-output* "pr ref: ~s~%" ref)
+                  #+debug
+                  (format *standard-output* "pr ref: ~s~%" ref)
                   (if (uiop:string-prefix-p prefix ref)
                       (progn
                         (format *standard-output* "ref ok match: ~s~%" ref)
@@ -283,6 +281,7 @@
 
 (defun git-latest-automated-branch (&key prefix remote)
   "a real remote branch, may or may not have a pull request"
+  #+debug
   (format t "glab: ~a ~a ~a~%" prefix remote (git-list-remote-branch-names :remote remote))
   (car
    (sort
@@ -292,20 +291,13 @@
         collect branch)
     #'string>)))
 
-(defun forge-get-repository (something)
-  ;; it seem that this works based on context
-  (declare (ignore something))
-  (error "TODO"))
-
 (defun get-json (uri)
   (multiple-value-bind (body status response-headers response-uri stream)
-    ; #-dumped-image
-    ; (lambda () (values 1 2 3 4 5)) ; while we are developed
-    ; #+dumped-image ; 
     (dex:get uri)
     (declare (ignore response-headers))
     (declare (ignore response-uri))
     (declare (ignore stream))
+    #+debug
     (format t "get-json status: ~a~%" status)
     (if (eq status 200)
         #+(and would have to define constructors for the return object for this to work correctly)
@@ -319,14 +311,9 @@
            :scheme "https"
            :host "api.github.com"
            :path (concatenate 'string "/repos/" (repo-owner repo) "/" (repo-name repo) "/pulls")
-           )
-          #+()
-          (format nil ; could use quri
-                  "https://api.github.com/repos/~a/~a/pulls"
-                  (repo-owner repo) (repo-name repo))))
-    #+()
+           )))
+    #+debug
     (format t "uri: ~s" uri)
-    ;#+()
     (get-json uri)))
 
 (defun repo-forge-fill-values (repo)
@@ -337,7 +324,8 @@
   (let ((github-pos (search "github.com" (repo-remote repo))))
     (cond (github-pos
            (setf (repo-forge repo) 'github)
-           (let* ((r (reverse (uiop:split-string (subseq (repo-remote repo) (+ github-pos 10)) :separator '(#\/ #\:))))
+           (let* ((r (reverse (uiop:split-string (subseq (repo-remote repo) (+ github-pos 10))
+                                                 :separator '(#\/ #\:))))
                   (name-ext (car r))
                   (name (car (uiop:split-string name-ext :separator '(#\.))))
                   (owner (cadr r)))
@@ -355,12 +343,11 @@
             "https://github.com/tgbugs/pyontutils.git")))
     (let ((out (repo-forge-fill-values test-repo)))
       out)))
-;#+()
+
 (defvar *var* nil)
 (defun test-1.5 ()
   (progn
     (setf *var* (test))
-                                        ;(loop for k being the hash-keys of (car *var*))
     (loop for (k . v) in (car *var*) collect k)
 
     (assoc :title (car *var*))
@@ -385,8 +372,6 @@
          ;; XXX warning, ensure we push creating a new branch
          (target (or target (git-get-upstream-branch (git-master-branch))))
 
-         #+()
-         (head-repo (forge-get-repository 'stub))
          (head-repo *current-repo*)
          (uri-path (concatenate 'string "/repos/"
                                 (repo-owner head-repo) "/"
@@ -419,27 +404,7 @@
                                (concatenate 'string (repo-owner head-repo) ":" head-branch)))
                 ("draft" . t)
                 ("maintainer_can_modify" . t))))))
-      resp)
-
-    ;; see `ghub-request' for full details
-    #+()
-    (pcase-let* ((`(,base-remote . ,base-branch)
-                   (magit-split-branch-name target))
-                 (`(,head-remote . ,head-branch)
-                   (magit-split-branch-name source)))
-
-                (ghub-post
-                 (forge--format-resource head-repo "/repos/:owner/:repo/pulls")
-                 `((title . , title)
-                   (body  . , body)
-                   (base  . ,base-branch)
-                   (head  . ,(if (equal head-remote base-remote)
-                                 head-branch
-                                 (concat (oref head-repo owner) ":" head-branch)))
-                   (draft . t) ; automated pull requests should always be drafts
-                   (maintainer_can_modify . t))
-                 :auth 'forge)))
-  )
+      resp)))
 
 (defun test-create-pull-request ()
   (defrepo 'test-github-api "git@github.com:tgbugs/test-github-api.git")
@@ -463,16 +428,8 @@
     )
   )
 
-#+(and this won't work outside of with repo)
+#+(and this won't work outside of with-repo)
 (test-create-pull-request)
-
-#+()
-(defun ghub-post (resource alist &key forge))
-#+()
-(defun forge-get-repositry (remote something operation)
-  "this is an eieio method which I absolutely hate")
-#+()
-(defun forge--pull (repo something callback))
 
 (defun run-git (&rest args)
   ;; apparently this already has knowledge of the repo in question ...
@@ -480,14 +437,15 @@
   (let ((*default-pathname-defaults* *repo-working-dir*))
     (apply #'call-git args)))
 
-(let ((sigh '(1 2 3 :foo poop))) (setf (getf sigh :foo) nil))
-(let ((sigh '(1 2 3 4 :foo poop))) (setf (getf sigh :foo) nil) sigh)
-#+(or not allowed at all the replacas are coming for us)
-(let ((sigh '(1 2 3 :foo poop 10 11 12))) ; sigh
-  ;(getf sigh :foo)
-  (setf (cadr (member :foo sigh)) nil)
-  sigh
-  )
+(defun test-setf-getf ()
+  (let ((sigh '(1 2 3 :foo poop))) (setf (getf sigh :foo) nil))
+  (let ((sigh '(1 2 3 4 :foo poop))) (setf (getf sigh :foo) nil) sigh)
+  #+(and not allowed at all the replacas are coming for us)
+  (let ((sigh '(1 2 3 :foo poop 10 11 12))) ; sigh
+    ;;(getf sigh :foo)
+    (setf (cadr (member :foo sigh)) nil)
+    sigh
+    ))
 
 (defun cull-keyword (args key)
   "not efficient, but works"
@@ -539,7 +497,7 @@ from nil.")
       (values (get-output-stream-string out) process))))
 
 (defun call-git (&rest args)
-  #+()
+  #+debug
   (format t "wat: ~s ~s ~s~%" args *default-pathname-defaults* *repo-working-dir*)
   (let* ((out (make-string-output-stream))
          (process (sb-ext:run-program
@@ -549,46 +507,41 @@ from nil.")
                    :output out
                    :error *error-output*
                    :search t)))
-    #+()
+    #+debug
     (when *current-git-output-port*
       (format *current-git-output-port* "git output for git ~a:~%~a" args (get-output-stream-string out)))
     (when (and *git-raise-error* (not (= 0 (sb-ext:process-exit-code process))))
       (error (format nil "git ~s failed with status ~s~%"
                      args
-                     (sb-ext:process-exit-code process)
-                     )))
+                     (sb-ext:process-exit-code process))))
     (values (get-output-stream-string out) process)))
 
 (defun git-master-branch ()
   ; TODO
   "master")
 
-#+()
-(defun path-as-directory (path)
-  (if (uiop:directory-pathname-p))
-  )
-
 (defun split-string-nl (string)
-  (remove-if (lambda (s) (string= s ""))
-               (uiop:split-string
-                string
-                :separator '(#\Newline))))
+  (remove-if
+   (lambda (s) (string= s ""))
+   (uiop:split-string
+    string
+    :separator '(#\Newline))))
 
 (defun split-branch-name (branch)
-  (cond ((member branch (git-list-local-branch-names) :test #'string=)
-         (cons "." branch))
-        ((find #\/ branch)
-         (or (loop for remote in (git-list-remotes)
-                   when
-                   (uiop:string-prefix-p
-                    (concatenate 'string remote "/")
-                    branch)
-                   return (cons remote (cadr (uiop:split-string branch :separator '(#\/)))))))))
+  (cond
+    ((member branch (git-list-local-branch-names) :test #'string=)
+     (cons "." branch))
+    ((find #\/ branch)
+     (or (loop for remote in (git-list-remotes)
+               when
+               (uiop:string-prefix-p
+                (concatenate 'string remote "/")
+                branch)
+               return (cons remote (cadr (uiop:split-string branch :separator '(#\/)))))))))
 
 (defun branch-local-name (branch)
   (format t "bln: ~a~%" branch)
   (let* ((bn (split-branch-name branch))
-         ;;(remote (car bn))
          (branch (cdr bn)))
     branch))
 
@@ -629,9 +582,6 @@ from nil.")
     (cl-git:clone-repository repo-url worktree)
     ;; FIXME probably need to ensure parent exists at some point?
     (call-git "-C" parent "clone" repo-url dir-name)))
-
-#+()
-(git-clone "https://github.com/tgbugs/pyontutils.git" "/tmp/foopoop-asdf/pyontutils")
 
 (defun git-status (&rest paths)
   (run-git "status" "--" paths))
@@ -681,7 +631,6 @@ from nil.")
 (defun git-config (&rest key-elems)
   (let ((*git-raise-error* nil) ; config returns 1 if key not found which isn't an error in this case
         (key (format nil "~{~A~^.~}" key-elems)))
-    ;;(format t key)
     (split-string-nl
      (run-git "config" key))))
 
@@ -689,10 +638,6 @@ from nil.")
   (car (split-string-nl (run-git "rev-parse" "--abbrev-ref" refname))))
 
 (defun git-get-current-branch ()
-  #+()
-  (string-right-trim
-   '(#\Newline)
-   (run-git "rev-parse" "--abbrev-ref" "HEAD"))
   (git-ref-abbrev "HEAD"))
 
 (defun git-primary-remote ()
@@ -742,9 +687,9 @@ from nil.")
           ))
     (format t "~s~%"
             (list
-                                        ;(git-status)
-                                        ;(git-diff)
-                                        ;(git-log-p-n-1)
+             ;;(git-status)
+             ;;(git-diff)
+             ;;(git-log-p-n-1)
              (git-get-current-branch)
              (git-config "branch" "master" "remote")
              (git-list-remotes)
@@ -757,40 +702,10 @@ from nil.")
              #+()
              (git-ls-others)))))
 
-;;; functionality we actually need for agt
-
-#+()
-(repo-name
- old-branch
- new-branch
- command-fun
- diff-pattern
- get-add-files
- pr-title
- pr-body)
-
-#|
-fetch remote forge data
-check if auto pr already exists
-get the parent branch of the old-branch or the main branch if it does not 
-
-a bunch of local git stuff to get the repo in the right state
-
-run command-fun
-get files changed
-filter files to add from changed
-add files
-
-push
-pr already exists create it
-
-go back to wherever we were before
-|#
-
 (defmacro with-repo (&rest body)
     #+()
     (&body body &key ((:no-clone do-not-clone)) &allow-other-keys)
-  ;; XXX cannot have :no-clone as a &key because then body can only have an even number of arguments 
+  ;; XXX cannot have :no-clone as a &key because then body can only have an even number of arguments
   ;; cl reeeally not good a mixing rest and kwargs
   ;; amusingly this doesn't quire repo-id because repo-id is already present in defsync ...
   ;; I understand why this is an easier way to ensure that we have the repo we want present
@@ -813,30 +728,6 @@ go back to wherever we were before
 
 (defun file-name-with-extension (path extension)
   (concatenate 'string (uiop:split-name-type path) "." extension))
-
-#+() ; don't need this dex:fetch exists :)
-(defun url-copy-file (uri path &key buffer-size)
-  "a not-quite-the-same version of url-copy-file from elisp"
-  ;; see https://stackoverflow.com/questions/53344127 for variants
-  ;; see uiop:copy-stream-to-stream and alexandria:copy-stream
-  (let ((in-stream (dex:get uri :want-stream t))
-        #+()
-        (buffer (make-array (or buffer-size 4096) :element-type 'unsigned-byte)))
-    (with-open-file (out-stream path
-                         :direction :output
-                         :if-exists :supersede
-                         :if-does-not-exist :create
-                         :element-type 'unsigned-byte)
-      (uiop:copy-stream-to-stream in-stream out-stream :element-type 'unsigned-byte))
-    #+(and nope need better error handling use uiop or alexandria)
-    (with-open-file (out-stream path
-                         :direction :output
-                         :if-exists :supersede
-                         :if-does-not-exist :create
-                         :element-type 'unsigned-byte)
-      (loop :for p := (read-sequence buffer byte-stream)
-            :while (plusp p)
-            :do (write-sequence buffer out-stream :end p)))))
 
 (defun defsync
     (&key
@@ -918,7 +809,6 @@ go back to wherever we were before
                 nil)
               (format t "no files changed ...~%"))))))
 
-;(macroexpand
 (defun main (&key fun)
   (parse-args:cli-gen
    (((:current-build-id (make-build-id)) *build-id*) ; set `current-build-id' from cli if needed
@@ -937,20 +827,21 @@ go back to wherever we were before
     ((:pr-branch-prefix nil) pr-branch-prefix) ; override defsync :prefix
     )
    (declare (ignore parse-args::cases parse-args::returns parse-args::parsed))
-   (format *standard-output* "argv: ~A~%" sb-ext:*posix-argv*)
-   (format *standard-output* "~S~%"
-           (list
-            :bid *build-id*
-            :ppr *push-pr*
-            :res resume ;|resume|
-            :deb debug ;|debug|
-            :bd cli-build-dir
-            :as auth-source
-            :oas *oa-secrets*
-            :ss *sync-specs*
-            :ccs cli-current-sync
-            :bpr pr-branch-prefix
-            ))
+   (when debug
+     (format *standard-output* "argv: ~A~%" sb-ext:*posix-argv*)
+     (format *standard-output* "~S~%"
+             (list
+              :bid *build-id*
+              :ppr *push-pr*
+              :res resume ;|resume|
+              :deb debug ;|debug|
+              :bd cli-build-dir
+              :as auth-source
+              :oas *oa-secrets*
+              :ss *sync-specs*
+              :ccs cli-current-sync
+              :bpr pr-branch-prefix
+              )))
    (let ((*auth-sources* (or (and auth-source (cons auth-source *auth-sources*)) *auth-sources*))
          (*build-dir* (uiop:ensure-directory-pathname cli-build-dir)) ; SIGH
          (*current-git-output-port* (when debug *standard-output*))
@@ -959,7 +850,7 @@ go back to wherever we were before
          *current-sync*)
      (ensure-directories-exist *build-dir*)
      (if (or (and *sync-specs* cli-current-sync) (uiop:string-prefix-p "test" cli-current-sync))
-         (let ((fun (intern (string-upcase (concatenate 'string "sync-" cli-current-sync)) 'prcl-sync))) ; XXX this probably won't work like in el
+         (let ((fun (intern (string-upcase (concatenate 'string "sync-" cli-current-sync)) 'prcl-sync)))
            (when *sync-specs*
              (in-package :prcl-sync)
              (load *sync-specs*)
@@ -972,14 +863,11 @@ go back to wherever we were before
          (when cli-current-sync
            (format t "unknown sync function ~a~%" cli-current-sync)
            ;; TODO set exit value
-           (uiop:quit 1)
-           #+()
-           (sb-ext:quit :unix-status 1)))
+           (uiop:quit 1)))
      (when *current-sync*
        (format *standard-output* "~async completed for ~a ~a~%"
                (if *push-pr* "" "pretend ")
                *current-sync* *build-id*)))))
-;)
 
 (in-package :prcl-sync)
 
@@ -993,7 +881,7 @@ go back to wherever we were before
 
 (defrepo 'test-github-api "https://github.com/tgbugs/test-github-api.git")
 (defun sync-test-2 ()
-  #+(or debug)
+  #+debug
   (format *standard-output* "HAWYEE ??????~%")
   (let ((*random-state* (make-random-state t)) ; per sbcl manual `*random-state*' inits to same value at start
         ; note also that this works because `*random-state*' is not initialized with a default value
@@ -1026,8 +914,8 @@ go back to wherever we were before
 (export 'sync-test-2 :prcl-sync)
 
 (in-package :prcl)
-;(format t "~S~%" *features*)
-;(format t "~S~%" (uiop:raw-command-line-arguments))
+#+debug (format t "features: ~S~%" *features*)
+#+debug (format t "raw-cli-args: ~S~%" (uiop:raw-command-line-arguments))
 #-(or swank dumped-image) ; this is a hack that only sort of works
 (main)
 
