@@ -10,6 +10,7 @@
 ;; or slad and run the executable directly via prcl-build.lisp
 ;; ./prcl-build.lisp && bin/prcl --specs path/to/sync-specs.lisp --fun test
 
+;; FIXME detect stale automated branches and error if the upstream branch has changed or something
 ;; FIXME add new file if not exists fails in some cases?
 ;; FIXME need separate working trees/copies of repos per sync to avoid concurrent syncs using the same repo
 ;; TODO fork to do the git operations as a user without push rights?
@@ -245,6 +246,7 @@
   (let ((out
           (or (repo-local repo)
               (uiop:ensure-directory-pathname (merge-pathnames (repo-name repo) *build-dir*)))))
+    ;#+debug
     (format t "rlp out: ~s ~s~%" *build-dir* out)
     out
     ))
@@ -588,12 +590,15 @@ from nil.")
 (defun git-status (&rest paths)
   (run-git "status" "--" paths))
 
-(defun git-stash-checkout-pull (&optional branch)
+(defun git-stash-checkout (&optional branch)
   (let ((branch (or branch (git-master-branch))))
     (when (or (git-diff) (git-ls-others))
       (git-stash-both))
-    (run-git "checkout" branch)
-    (run-git "pull")))
+    (run-git "checkout" branch)))
+
+(defun git-stash-checkout-pull (&optional branch)
+  (git-stash-checkout branch)
+  (run-git "pull"))
 
 (defun git-stash-both ()
   ;; the magit version of this is hideously complicated
@@ -750,7 +755,7 @@ from nil.")
       ; :no-clone t
       (repo-forge-fill-values *current-repo*)
       (let* ((source-branch (or old-branch (git-master-branch)))
-             (_ (run-git "checkout" source-branch)) ; if not (git-master-branch) won't exist will error
+             (_ (git-stash-checkout source-branch)) ; if not (git-master-branch) won't exist will error
              (branch-prefix-string (or *pr-branch-prefix* branch-prefix-string *pr-branch-prefix-default*))
              (pr-already-exists (get-latest-automated-pr-branch
                                  *current-repo*
