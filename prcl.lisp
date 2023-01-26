@@ -1,5 +1,7 @@
 ;; -*- mode: Common-Lisp -*-
 
+;;; usage
+
 ;; there are at least three ways to use this file
 
 ;; run it in emacs via slime (you may need to run the `ql:quickload's first)
@@ -10,10 +12,18 @@
 ;; or slad and run the executable directly via prcl-build.lisp
 ;; ./prcl-build.lisp && bin/prcl --specs path/to/sync-specs.lisp --fun test
 
+;;; configuration
+
+;; add an entry in ~/.netrc for the build user e.g.
+;; machine github.com login github-user password ghp_etcetcetc
+;; prcl then automatically adds the following to .git/config
+;; pushurl https://github-user@github.com/github-user/repo.git
+;; this is a stop-gap until some more sensible solution appears
+
 ;; FIXME detect stale automated branches and error if the upstream branch has changed or something
 ;; FIXME add new file if not exists fails in some cases?
 ;; FIXME need separate working trees/copies of repos per sync to avoid concurrent syncs using the same repo
-;; TODO fork to do the git operations as a user without push rights?
+;; TODO deal with prov churn issues, possibly by moving prov triples to a central file and pointing to it
 ;; TODO see if we can use cl-git (answer: not quickly, and not completely if with ssh)
 
 (in-package :cl-user)
@@ -80,7 +90,7 @@
 (defvar *oa-secrets* "~/ni/dev/secrets.sxpr") ; FIXME abstract path
 (defvar *auth-sources* nil)
 (defvar *authinfo-order* '(:host :port :user :secret))
-(defvar *repo-working-dir* nil)
+(defvar *repo-working-dir*)
 ;(export *repo-working-dir* 'prcl)
 (defvar *build-dir* (uiop:ensure-directory-pathname (merge-pathnames "prm-repos" (uiop:default-temporary-directory))))
 (defvar *sync-specs* (and
@@ -99,8 +109,20 @@
   (defvar *do-not-clone* nil
     "if set do not clone during `with-repo' setup"))
 
+(defvar *forge-user*) ; FIXME refactor usage to pass as keyword to any function that uses it
+(defvar *forge-user-default* "tgbugs-build") ; XXX until we can get some cl-orthauth version up
+(defvar *forge-fork* nil
+  "if cannot push to target repo create a fork, only needed once per repo usually")
+(defvar *auto-sync-fork* nil
+  "whether to automatically sync forks with upstream"
+  )
+(defvar *no-auth* nil)
+(defvar *debug*)
 (defvar *git-raise-error* nil)
 (defvar *sepstr* (make-string 70 :initial-element #\-))
+
+(defun git-config-forge-user-push-remote (&key ((:forge-user forge-user) *forge-user*))
+  (list "prrequaestor" forge-user "push" "remote"))
 
 (defun executables () ; stupidly inefficient
   (loop with path = (uiop:getenv "PATH")
@@ -235,12 +257,59 @@
   (id nil)
   (local nil)
   (remote nil)
+  ;(local-remote-name nil) ; superseeded by the git config value ??
   (forge nil)
-  ;(forge-api nil)
+  ;(forge-api nil) ; via function
   (owner nil)
   (name nil)
   (pull-requests nil)
+  ;;(forge-user-repo nil) ; self if have push else other, superseded by (push nil)
+  (push nil) ; that would be the repo that the current api user can push to
   )
+
+(defun repo-forge-user-token-remote (repo &key ((:forge-user forge-user) *forge-user*))
+  (cond
+    ((eq (repo-forge repo) 'github)
+     (quri:render-uri
+      (quri:make-uri
+       :scheme "https"
+       :userinfo forge-user
+       :host "github.com"
+       :path (concatenate 'string "/" (repo-owner repo) "/" (repo-name repo) ".git"))))
+    (t (error (format nil "don't know forge for ~a" (repo-remote repo))))))
+
+(defun make-repo-from-working-dir (&key id
+                                     ((:working-dir working-dir) *repo-working-dir*)
+                                     ((:remote-name remote-name) "origin"))
+  (let* ((*repo-working-dir* working-dir)
+         (dwt (uiop:ensure-directory-pathname working-dir))
+         (dir-name (car (reverse (pathname-directory dwt))))
+         (remote (run-git "remote" "get-url" remote-name))
+         (repo
+           (make-repo
+            :id (or id (intern (string-upcase dir-name)))
+            :remote remote
+            :local working-dir)))
+    (repo-remote-fill-values repo)
+    repo))
+
+(defun git-forge-user-repo-push (repo)
+  (let ((remote-push-name
+          (car (apply #'git-config (git-config-forge-user-push-remote)))))
+    (and
+     remote-push-name
+     (if (string= remote-push-name "origin")
+         repo
+         (make-repo-from-working-dir
+          :id (intern (concatenate 'string (symbol-name (repo-id repo)) "-" *forge-user*))
+          :remote-name remote-push-name)))))
+
+#-dumped-image
+(defun test-gfrurp ()
+  (let* ((*repo-working-dir* #p"/tmp/test-prcl-build-dir/test-github-api/")
+         (repo (make-repo-from-working-dir)))
+    (git-forge-user-repo-push repo)
+    ))
 
 (defun repo-local-path (repo)
   (let ((out
@@ -295,9 +364,11 @@
         collect branch)
     #'string>)))
 
-(defun get-json (uri)
+(defun get-json (uri &key auth)
   (multiple-value-bind (body status response-headers response-uri stream)
-    (dex:get uri)
+      (dex:get uri
+               :verbose *debug*
+               :headers (github-api-headers :auth auth))
     (declare (ignore response-headers))
     (declare (ignore response-uri))
     (declare (ignore stream))
@@ -320,9 +391,117 @@
     (format t "uri: ~s" uri)
     (get-json uri)))
 
+(defun github-api-headers (&key auth)
+  (cons '("Accept" . "application/vnd.github+json")
+        (when auth
+          (unless *github-token*
+            (error "no auth token has been set"))
+          (list
+           (cons "Authorization" (concatenate 'string "token " *github-token*))))))
+
+(define-condition continue-from-http-error (condition) ())
+(defun forge-get-repo-push (repo &key fork)
+  (let* ((ok-to-fork (or fork *forge-fork*))
+         (push
+           (or
+            (repo-push repo) ; if the value is already set return it !??!?! is that the right hack here ???
+            (git-forge-user-repo-push repo) ; see if this is already configured locally
+            ;; (let (fork) (and (forge-repo-exists fork))) ; XXX we can't do this here because we need to check collaborators first
+            (restart-case
+                (handler-bind
+                    ((dexador.error:http-request-failed
+                       (lambda (condition)
+                         (let ((status (dexador.error:response-status condition)))
+                           (cond ((= status 403) ; must have push acces to view repository collaborators
+                                  (invoke-restart 'continue-from-http-error status))
+                                 ;; 404 means private and we have no access at all and should never get here
+                                 (t
+                                  (signal condition)))))))
+                  (and ; if we don't get an error checking collaborators then repo is push
+                   (let ((uri-collaborators
+                           (quri:make-uri
+                            :scheme "https"
+                            :host "api.github.com"
+                            :path (concatenate
+                                   'string
+                                   "/repos/" (repo-owner repo)
+                                   "/" (repo-name repo) "/collaborators"))))
+                     (get-json uri-collaborators :auth t))
+                   repo))
+              (continue-from-http-error (&optional status)
+                (unless (or (not status) (= status 403))
+                  (error (format nil "unhandled status ~a" status)))
+                (let ((fork (repo-fork-repo repo :user *forge-user*)))
+                  (unless (forge-repo-exists fork)
+                    (if ok-to-fork
+                        (forge-fork-repo repo :fork fork :block t)
+                        (error (format nil "no push access to ~a as ~a and not ok to fork"
+                                       (repo-name repo) *forge-user*))))
+                  (setf (repo-push fork) fork)
+                  (let ((fork-remote-name (repo-owner fork)))
+                    (unless (apply #'git-config (git-config-forge-user-push-remote))
+                      (setf (apply #'git-config (git-config-forge-user-push-remote))
+                            fork-remote-name))
+                    (unless (git-remote-exists fork-remote-name)
+                      (git-remote-add fork-remote-name (repo-remote fork))))
+                  (repo-forge-fill-values fork)
+                  fork)
+                )))))
+    (when (and
+           (not (equal repo push))
+           (not (git-config "remote" (repo-owner push) "pushurl"))
+           #+() ; dumb, just wrap with *git-raise-error* nil
+           (restart-case
+               (handler-bind
+                   ((error
+                      (lambda (condition)
+                        (declare (ignore condition))
+                        (invoke-restart 'continue-from-git-error))))
+                 (run-git "remote" "get-url" "--push" (repo-owner push))) ; FIXME conflating branch name here
+             (continue-from-git-error ()
+               nil)))
+        (run-git "remote" ; must set token push url, also will encounter issues with ssh
+                 "set-url" "--add" "--push" (repo-owner push) ; FIXME conflating branch name here
+                 (repo-forge-user-token-remote push)))
+    push))
+
+(defun repo-forge-api (repo)
+  (cond
+    ((eq (repo-forge repo) 'github)
+     (quri:make-uri
+      :scheme "https"
+      :host "api.github.com"
+      :path
+      (concatenate
+       'string "/repos/" (repo-owner repo) "/" (repo-name repo))))
+    (t (error (format nil "don't know forge for ~a" (repo-remote repo))))))
+
+(defun forge-repo-exists (repo)
+  ; https://api.github.com/repos/tgbugs-build/test-github-api
+  (restart-case
+      (handler-bind
+          ((dexador.error:http-request-failed
+             (lambda (condition)
+               (invoke-restart 'continue-from-http-error (dexador.error:response-status condition)))))
+        (dex:head
+         (repo-forge-api repo)
+         :headers (github-api-headers :auth t)))
+    (continue-from-http-error (&optional status)
+      (declare (ignore status))
+      nil)))
+
+(defun forge-fork-repo (repo &key fork block)
+  (cond
+    ((eq (repo-forge repo) 'github)
+     (github-fork-repo repo :fork fork :block block))
+    (t (error (format nil "don't know forge for ~a" (repo-remote repo))))))
+
 (defun repo-forge-fill-values (repo)
-  (let ((pull-requests (forge-get-repo-prs repo)))
-    (setf (repo-pull-requests repo) pull-requests)))
+  (let ((pull-requests (forge-get-repo-prs repo))
+        (push (and (not *no-auth*) ; if we are in no-auth mode we can't check this
+                   (forge-get-repo-push repo))))
+    (setf (repo-pull-requests repo) pull-requests)
+    (setf (repo-push repo) push)))
 
 (defun repo-remote-fill-values (repo)
   (let ((github-pos (search "github.com" (repo-remote repo))))
@@ -335,8 +514,27 @@
                   (owner (cadr r)))
              (setf (repo-owner repo) owner)
              ;; cannot set repo-local until *build-dir* is known, otherwise it will always be /tmp/repo-name
-             (setf (repo-name repo) name))))))
+             (setf (repo-name repo) name)))
+          (t (error (format nil "don't know forge for ~a" (repo-remote repo)))))))
 
+(defun remote-from-forge-user-name (forge user name &key ((:uri-type uri-type) 'git))
+  (cond
+    ((eq forge 'github)
+     (cond
+       ((eq uri-type 'git) (concatenate 'string "git@github.com:" user "/" name ".git"))
+       (t (error (format nil"uri-type not implemented ~a" uri-type)))))
+    (t (error (format nil "don't know forge ~a" forge)))))
+
+(defun repo-fork-repo (repo &key user)
+  (make-repo
+   :id (intern (concatenate 'string (symbol-name (repo-id repo)) "-" user))
+   ;;:local-remote-name user ; TODO may be set by user in the future if organization ; XXX not clear we need this, get the push remote from git config mostly
+   :forge (repo-forge repo) ; someday cross forge pulls ... hah right ?! who would enable such a thing?
+   :owner user
+   :name (repo-name repo) ; TODO set by new name if/when we let people provide it
+   :remote (remote-from-forge-user-name (repo-forge repo) user (repo-name repo))))
+
+#-dumped-image
 (defun test ()
 
   (let ((owner "tgbugs") (name "pyontutils"))
@@ -348,7 +546,9 @@
     (let ((out (repo-forge-fill-values test-repo)))
       out)))
 
+#-dumped-image
 (defvar *var* nil)
+#-dumped-image
 (defun test-1.5 ()
   (progn
     (setf *var* (test))
@@ -362,14 +562,77 @@
     (repo-forge-fill-values (gethash 'apinatomy-models *repos*))
     (get-latest-automated-pr-branch
      (gethash 'apinatomy-models *repos*))
+    (repo-remote-push (gethash 'apinatomy-models *repos*))
 
+    #+()
+    (progn
+      (setf *forge-user* "tgbugs-build")
+      (setf *github-token* (ensure-token-exists)))
     (defrepo 'test-github-api
       "https://github.com/tgbugs/test-github-api.git")
     (repo-forge-fill-values (gethash 'test-github-api *repos*))
     (get-latest-automated-pr-branch
      (gethash 'test-github-api *repos*))
-
+    (defvar rp nil)
+    (setf rp (forge-get-repo-push (gethash 'test-github-api *repos*)))
     ))
+
+(defun github-fork-repo (repo &key fork block)
+  (let* ((uri-path
+           (concatenate
+            'string
+            "/repos/" (repo-owner repo) "/" (repo-name repo) "/forks"))
+         (uri
+           (quri:make-uri
+            :scheme "https"
+            :host "api.github.com"
+            :path uri-path
+            ))
+         (resp
+           (dex:post
+            uri
+            :headers (github-api-headers :auth t)
+            )))
+    (format t "github-fork-repo-resp: ~a~%" resp)
+    (when block
+      ; exponential backoff on the retry until it is up
+      ; with a supremum retry time of 64 seconds
+      (or (loop
+            for time in '(0 1 2 4 8 16 32)
+            do (format t "no fork waiting for ~s~%" time)
+            do (sleep time)
+            when (forge-repo-exists fork)
+              return t)
+          (loop
+            for i upto 4
+            do (format t "no fork waiting for ~s~%" 64)
+            do (sleep 64)
+            when (forge-repo-exists fork)
+              return t)
+          (error "we've hit the 5 minute limit that github suggests to wait and still nothing")))))
+
+(defun github-merge-upstream (repo branch)
+  ;; FIXME we should probably do this locally and not on the remote
+  ;; FIXME need to get the repo-push for this and repo in the index usually _is_ the upstream repo
+  (let* ((uri-path
+           (concatenate
+            'string
+            "/repos/" (repo-owner repo) "/" (repo-name repo) "/merge-upstream"))
+         (uri
+           (quri:make-uri
+            :scheme "https"
+            :host "api.github.com"
+            :path uri-path))
+         (content
+           (cl-json:encode-json-to-string
+            `(("branch" . ,branch))))
+         (resp
+           (dex:post
+            uri
+            :headers (github-api-headers :auth t)
+            :content content
+            )))
+    resp))
 
 (defun github-create-pull-request (title body &key source target)
   (let* ((source (or source (git-get-upstream-branch (git-get-current-branch))))
@@ -410,6 +673,7 @@
                 ("maintainer_can_modify" . t))))))
       resp)))
 
+#-dumped-image
 (defun test-create-pull-request ()
   (defrepo 'test-github-api "git@github.com:tgbugs/test-github-api.git")
   (let ((repo-id  'test-github-api)
@@ -441,6 +705,7 @@
   (let ((*default-pathname-defaults* *repo-working-dir*))
     (apply #'call-git args)))
 
+#-dumped-image
 (defun test-setf-getf ()
   (let ((sigh '(1 2 3 :foo poop))) (setf (getf sigh :foo) nil))
   (let ((sigh '(1 2 3 4 :foo poop))) (setf (getf sigh :foo) nil) sigh)
@@ -565,7 +830,7 @@ from nil.")
    (pathname-directory foo)
    (directory foo)
    (directory-namestring foo)
-   (file-namestring foo)
+   :file-namestring (file-namestring foo)
    (uiop:pathname-parent-directory-pathname foo)
    "--"
    (uiop:ensure-directory-pathname poop)
@@ -573,7 +838,7 @@ from nil.")
    (pathname-directory poop)
    (directory poop)
    (directory-namestring poop)
-   (file-namestring poop)
+   :file-namestring (file-namestring poop)
    (uiop:pathname-parent-directory-pathname poop)
    ))
 
@@ -587,17 +852,38 @@ from nil.")
     ;; FIXME probably need to ensure parent exists at some point?
     (call-git "-C" parent "clone" repo-url dir-name)))
 
+(defun git-fetch (&optional remote)
+  (run-git "fetch" remote))
+
 (defun git-status (&rest paths)
   (run-git "status" "--" paths))
 
-(defun git-stash-checkout (&optional branch)
-  (let ((branch (or branch (git-master-branch))))
+;;(define-condition continue-from-git-error (condition) ()) ; not needed, *git-raise-error* nil better
+(defun git-stash-checkout-reset (&optional branch)
+  (let ((branch (or branch (git-master-branch)))
+        (upstream-branch (concatenate 'string (git-push-remote) "/" branch)))
     (when (or (git-diff) (git-ls-others))
       (git-stash-both))
-    (run-git "checkout" branch)))
+    (run-git "checkout" branch)
+    (or
+     (let (*git-raise-error*) (git-ref-abbrev (concatenate 'string branch "@{upstream}")))
+     (run-git "branch" (concatenate 'string "--set-upstream-to=" upstream-branch) branch))
+    #+() ; duh
+    (restart-case
+        (handler-bind
+            ((error
+               (lambda (condition)
+                 (declare (ignore condition))
+                 (invoke-restart 'continue-from-git-error))))
+          (git-ref-abbrev (concatenate 'string branch "@{upstream}")))
+      (continue-from-git-error ()
+        ;; FIXME > asuming error code
+        (run-git "branch" (concatenate 'string "--set-upstream-to=" upstream-branch)
+                 branch)))
+    (run-git "reset" "--hard" upstream-branch)))
 
-(defun git-stash-checkout-pull (&optional branch)
-  (git-stash-checkout branch)
+(defun git-stash-checkout-reset-pull (&optional branch)
+  (git-stash-checkout-reset branch)
   (run-git "pull"))
 
 (defun git-stash-both ()
@@ -641,6 +927,10 @@ from nil.")
     (split-string-nl
      (run-git "config" key))))
 
+(defun (setf git-config) (value &rest key-elems)
+  (run-git "config" (format nil "~{~A~^.~}" key-elems) value)
+  value)
+
 (defun git-ref-abbrev (refname)
   (car (split-string-nl (run-git "rev-parse" "--abbrev-ref" refname))))
 
@@ -657,26 +947,38 @@ from nil.")
         (lambda (s) s)
         (cons (git-config "magit.primaryRemote") '("upstream" "origin"))))))))
 
+(defun git-push-remote (&key ((:forge-user forge-user) *forge-user*))
+  (car (apply #'git-config (git-config-forge-user-push-remote :forge-user forge-user))))
+
+(defun git-remote-add (remote-name remote-uri)
+  (run-git "remote" "add" remote-name remote-uri))
+
+(defun git-remote-exists (remote-name)
+  (member remote-name (git-list-remotes) :test #'string=))
+
 (defun ensure-token-exists ()
   ;; TODO derive from somewhere/something like forge
   (let ((host "api.github.com")
-        (user "tgbugs"))
+        (user *forge-user*))
+    (unless user
+      (error "*forge-user* has not been set"))
     (oa-authinfo-get
      (intern host 'keyword)
-     (intern (concatenate 'string user "^" "forge") 'keyword))))
+     (intern (concatenate 'string user "^" "prrequaestor") 'keyword))))
 
-(defun git-push ()
+(defun git-push (&key dry-run)
+  ;; FIXME reminder that there may be distinct push and pull urls
   (let* ((branch (git-get-current-branch))
          (is-set-remote (git-config "branch" branch "remote"))
-         (remote (or is-set-remote (git-primary-remote))))
+         (remote (or is-set-remote (git-push-remote)))) ; XXX TODO other remote ??? or did pushurl fix it?
     (if is-set-remote
-        (run-git "push")
+        (run-git "push" (and dry-run "--dry-run"))
         (progn
           (ensure-token-exists) ; before we proceed to push make sure we have access to create the pull request
           ;; we mostly use ssh access for git operations, but we need the token for api access
           ;; all the robots already have ssh keys that we can use for this stuff (mostly)
           ;; though having the access token might simplify operations? at least for github?
-          (run-git "push" "-v" "--set-upstream" remote branch)))))
+          (run-git "push" (and dry-run "--dry-run") "-v" "--set-upstream" remote branch)))))
 
 (defun git-get-upstream-branch (&optional branch)
   (let* ((branch (or branch (git-get-current-branch)))
@@ -688,6 +990,7 @@ from nil.")
          (upstream-branch (git-get-upstream-branch branch)))
     (run-git "reset" "--hard" upstream-branch)))
 
+#-dumped-image
 (defun test2 ()
   (let ((*repo-working-dir*
           #p"~/git/pyontutils/" ; fooing trailing slash on paths
@@ -726,11 +1029,32 @@ from nil.")
        ,(if *do-not-clone*
             '(error (format nil "not cloned and :no-clone is set, could clone to ~s~%" *repo-working-dir*))
             '(progn
-              (git-clone (repo-remote repo) *repo-working-dir*)
+              (git-clone (repo-remote repo) *repo-working-dir*) ; this must clone first
+              ;; FIXME repo-forge-fill-values needs to be called in here so we can get the configuration
+              ;; correct before anyone tries to run the block ???? OR with-repo is really with-repo
+              ;; and we need to sort all the push stuff out before we get here, and it is always
+              ;; (repo-push repo) that we pass into with-repo ? this is tricky because
+              ;; with-repo is technically the local repo that can have multiple remotes ...
+              ;;(can-push-p (repo-remote repo))
+              ;; TODO test push rights
               (setf just-cloned t))))
      (let ((*default-pathname-defaults* *repo-working-dir*)
            (*current-repo* repo)
-           (*repo-just-cloned* just-cloned))
+           (*repo-just-cloned* just-cloned)
+           ;; TODO figure out if there is a way we can skip actually needing a token when testing/internal
+           ;; also ideally we want to move toward being able to use tokens to push so we can dispense with
+           ;; needing ssh config, so I guess we provide a flag that will check for the token but not
+           ;; do the remote checks? or what ... hrm I think we need one that allows ensure-token-exists
+           ;; to return nil as well as one that disables authed forge checks, this mostly doesn't matter
+           ;; after the initial setup of a repo and fork as long as there is no push happening
+           (*github-token*
+             (unless *no-auth*
+               (format t "checking for api token ...~%")
+               (prog1
+                   (ensure-token-exists)
+                 (format t "token found ...~%")))))
+       (repo-forge-fill-values repo)
+       (git-fetch (car (apply #'git-config (git-config-forge-user-push-remote))))
        ,@body)))
 
 (defun file-name-with-extension (path extension)
@@ -753,9 +1077,8 @@ from nil.")
     (unless command-fun (error ":fn is a required argument"))
     (with-repo ; repo-id ; XXX possibly bad design but we don't need repo-id because cl is not hygenic ...
       ; :no-clone t
-      (repo-forge-fill-values *current-repo*)
       (let* ((source-branch (or old-branch (git-master-branch)))
-             (_ (git-stash-checkout source-branch)) ; if not (git-master-branch) won't exist will error
+             (_ (git-stash-checkout-reset source-branch)) ; if not (git-master-branch) won't exist will error
              (branch-prefix-string (or *pr-branch-prefix* branch-prefix-string *pr-branch-prefix-default*))
              (pr-already-exists (get-latest-automated-pr-branch
                                  *current-repo*
@@ -767,6 +1090,7 @@ from nil.")
                                                         (git-get-upstream-branch source-branch))))))
              (parent-branch-or-existing (or pr-already-exists latest-remote-auto-branch source-branch))
              (target-branch (or new-branch (concatenate 'string branch-prefix-string *build-id*))))
+        (declare (ignore _))
         (format t "pr-already-exists: ~s~%" pr-already-exists)
         (format t "latest-remote-auto-branch: ~s~%" latest-remote-auto-branch)
         (if *repo-just-cloned*
@@ -774,8 +1098,8 @@ from nil.")
               (run-git "checkout" parent-branch-or-existing))
             (progn
               (format t "stash and pull ...~%")
-              (git-stash-checkout-pull parent-branch-or-existing)))
-        (git-reset-to-upstream)
+              (git-stash-checkout-reset-pull parent-branch-or-existing)))
+        (git-reset-to-upstream) ; reminder that this fails if we didn't set upstream beforehand
         (format t "running command ... ~a~%" command-fun)
         (funcall command-fun)
         ;; FIXME the ordering of the operations seems a bit suspect here?
@@ -794,41 +1118,65 @@ from nil.")
                 (git-add files-to-add)
                 (git-commit (format nil "~a~%~%~a" pr-title (or pr-body "")))
                 (format t "~a~%~a~%~a~%" *sepstr* (git-log-p-n-1) *sepstr*)
-                (unless pr-already-exists
-                  (format t "checking for api token ...~%")
-                  (setf *github-token* (ensure-token-exists)))
-                (format t "token found ...~%")
-                (when *push-pr*
-                  (format t "pushing ...~%")
-                  (git-push)
-                  (unless pr-already-exists
-                    (format t "creating pull request ...~%")
-                    (github-create-pull-request
-                     pr-title
-                     pr-body
-                     :target (git-get-upstream-branch parent-branch-or-existing))
-                    ;; TODO print link to pull request so if run by human they can click
-                    )
-                  ;; note that we only run checkout back to master when
-                  ;; running for real when in pretend mode 99% of the time
-                  ;; the user will want the repo on the new branch
-                  (format t "checking out ~a branch ...~%" (git-master-branch))
-                  ;; TODO might need to stash again?
-                  (run-git "checkout" (git-master-branch)))
+                (if *push-pr*
+                    (progn
+                      (format t "pushing ...~%")
+                      ;; FIXME amusingly the changes I just finished implementing
+                      ;; are a problem because the API user might not, or rather
+                      ;; will amost surely not match the ssh user, so when we go
+                      ;; to push with a git@github.com:user/repo.git uri it will fail (lol)
+                      (git-push)
+                      (unless pr-already-exists
+                        (format t "creating pull request ...~%")
+                        (github-create-pull-request
+                         pr-title
+                         pr-body
+                         :target (git-get-upstream-branch parent-branch-or-existing))
+                        ;; TODO print link to pull request so if run by human they can click
+                        )
+                      ;; note that we only run checkout back to master when
+                      ;; running for real when in pretend mode 99% of the time
+                      ;; the user will want the repo on the new branch
+                      (format t "checking out ~a branch ...~%" (git-master-branch))
+                      ;; TODO might need to stash again?
+                      (run-git "checkout" (git-master-branch)))
+                    (progn
+                      (format t "dry-run push ...~%")
+                      (git-push :dry-run t)))
                 nil)
               (format t "no files changed ...~%"))))))
+
+(defun build ()
+  ;; FIXME not quite what we want because run-command-check writes to a string not stdout
+  (let* ((command "sbcl")
+         (args '("--script" "./prcl-build.lisp"))
+         (process (sb-ext:run-program
+                   command args
+                   :environment (or *subprocess-environment* (sb-ext:posix-environ))
+                   :directory *default-pathname-defaults*
+                   :output *standard-output*
+                   :error *error-output*
+                   :search t)))
+    (when (not (= 0 (sb-ext:process-exit-code process)))
+      (error (format nil "command ~s failed with status ~s~%"
+                     (cons command args)
+                     (sb-ext:process-exit-code process))))
+    process))
 
 (defun main (&key fun)
   (parse-args:cli-gen
    (((:current-build-id (make-build-id)) *build-id*) ; set `current-build-id' from cli if needed
     ((:push-pr) *push-pr*)
     ((:resume) resume) ; start from results of a pretend run ; TODO implement this
+    ((:forge-fork) *forge-fork*)
+    ((:forge-user *forge-user-default*) *forge-user*)
+    ((:no-auth) *no-auth*) ; only needed if testing before a fork has been created and .git/config updated
     ;; paths
     ((:build-dir *build-dir*) cli-build-dir)
     ((:auth-source nil) auth-source) ; pass an additional path to add to `auth-sources'
     ((:secrets *oa-secrets*) *oa-secrets*)
     ;; debug
-    ((:debug) debug)
+    ((:debug) *debug*)
     ;; dynamic sync
     ((:specs *sync-specs*) *sync-specs*) ; path to elisp file with sync defs
     ((:fun fun) cli-current-sync)
@@ -836,14 +1184,14 @@ from nil.")
     ((:pr-branch-prefix nil) pr-branch-prefix) ; override defsync :prefix
     )
    (declare (ignore parse-args::cases parse-args::returns parse-args::parsed))
-   (when debug
+   (when *debug*
      (format *standard-output* "argv: ~A~%" sb-ext:*posix-argv*)
      (format *standard-output* "~S~%"
              (list
               :bid *build-id*
               :ppr *push-pr*
               :res resume ;|resume|
-              :deb debug ;|debug|
+              :deb *debug* ;|debug|
               :bd cli-build-dir
               :as auth-source
               :oas *oa-secrets*
@@ -853,7 +1201,7 @@ from nil.")
               )))
    (let ((*auth-sources* (or (and auth-source (cons auth-source *auth-sources*)) *auth-sources*))
          (*build-dir* (uiop:ensure-directory-pathname cli-build-dir)) ; SIGH
-         (*current-git-output-port* (when debug *standard-output*))
+         (*current-git-output-port* (when *debug* *standard-output*))
          (*pr-branch-prefix* pr-branch-prefix)
          (*git-raise-error* t)
          *current-sync*)

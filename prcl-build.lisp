@@ -23,6 +23,8 @@ sbcl --load "${0}" --eval "(main)" --quit --end-toplevel-options "${@:1}"; exit
 ;; the compiler will barf
 ;; this is one of the issues with having an interning reader
 
+(in-package :cl-user)
+
 (defun build ()
   ;(asdf:load-system 'parse-args) ; doesn't work
   (pushnew :dumped-image *features*)
