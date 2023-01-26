@@ -118,6 +118,8 @@
   )
 (defvar *no-auth* nil)
 (defvar *debug*)
+#+swank ; make testing and development easier
+(setf *debug* nil)
 (defvar *git-raise-error* nil)
 (defvar *sepstr* (make-string 70 :initial-element #\-))
 
@@ -284,7 +286,7 @@
   (let* ((*repo-working-dir* working-dir)
          (dwt (uiop:ensure-directory-pathname working-dir))
          (dir-name (car (reverse (pathname-directory dwt))))
-         (remote (run-git "remote" "get-url" remote-name))
+         (remote (car (split-string-nl (run-git "remote" "get-url" remote-name))))
          (repo
            (make-repo
             :id (or id (intern (string-upcase dir-name)))
@@ -301,7 +303,7 @@
      (if (string= remote-push-name "origin")
          repo
          (make-repo-from-working-dir
-          :id (intern (concatenate 'string (symbol-name (repo-id repo)) "-" *forge-user*))
+          :id (intern (concatenate 'string (symbol-name (repo-id repo)) "-" (string-upcase *forge-user*)))
           :remote-name remote-push-name)))))
 
 #-dumped-image
@@ -331,25 +333,33 @@
     (repo-remote-fill-values repo)
     (setf (gethash (repo-id repo) *repos*) repo)))
 
-(defun get-latest-automated-pr-branch (repo &key prefix)
+(defun forge-latest-automated-pr-branch (repo &key prefix)
   ;; FIXME make sure the pull request is open!
-  (let ((prefix (or prefix *pr-branch-prefix* *pr-branch-prefix-default*))
-        out)
+  ;; FIXME this will pretty much only work for github
+  (let* ((prefix (or prefix *pr-branch-prefix* *pr-branch-prefix-default*))
+         (push-owner (repo-owner (repo-push repo)))
+         (expect-label-prefix (concatenate 'string push-owner ":" prefix))
+         out)
     #+debug
     (format t "prefix: ~a ~a ~a~%" prefix *pr-branch-prefix* *pr-branch-prefix-default*)
+    ;; concat the owner of the push repo to the prefix
     (loop for pr in (repo-pull-requests repo)
           ;;(assoc :title pr)
           ;;(assoc :base pr)
           ;; TODO sort by date
-          until (let ((ref (cdr
-                            (assoc :ref (cdr (assoc :head pr))))))
+          until (let* ((head (cdr (assoc :head pr)))
+                       (label (cdr (assoc :label head)))
+                       (ref (cdr (assoc :ref head)))
+                       ;;(repo (cdr (assoc :repo head)))
+                       ;;(owner (cdr (assoc :owner head)))
+                       )
                   #+debug
                   (format *standard-output* "pr ref: ~s~%" ref)
-                  (if (uiop:string-prefix-p prefix ref)
+                  (if (uiop:string-prefix-p expect-label-prefix label)
                       (progn
-                        (format *standard-output* "ref ok match: ~s~%" ref)
+                        (format *standard-output* "ref ok match: ~s~%" label)
                         (setf out ref))
-                      (format *standard-output* "ref no match: ~s~%" ref))))
+                      (format *standard-output* "ref no match: ~s~%" label))))
     out))
 
 (defun git-latest-automated-branch (&key prefix remote)
@@ -527,7 +537,7 @@
 
 (defun repo-fork-repo (repo &key user)
   (make-repo
-   :id (intern (concatenate 'string (symbol-name (repo-id repo)) "-" user))
+   :id (intern (concatenate 'string (symbol-name (repo-id repo)) "-" (string-upcase user)))
    ;;:local-remote-name user ; TODO may be set by user in the future if organization ; XXX not clear we need this, get the push remote from git config mostly
    :forge (repo-forge repo) ; someday cross forge pulls ... hah right ?! who would enable such a thing?
    :owner user
@@ -549,32 +559,37 @@
 #-dumped-image
 (defvar *var* nil)
 #-dumped-image
+(defvar *rp* nil)
+#-dumped-image
 (defun test-1.5 ()
   (progn
     (setf *var* (test))
     (loop for (k . v) in (car *var*) collect k)
 
     (assoc :title (car *var*))
-    (get-latest-automated-pr-branch (gethash 'pyontutils *repos*))
+    (forge-latest-automated-pr-branch (gethash 'pyontutils *repos*))
 
     (defrepo 'apinatomy-models
       "https://github.com/open-physiology/apinatomy-models.git")
     (repo-forge-fill-values (gethash 'apinatomy-models *repos*))
-    (get-latest-automated-pr-branch
+    (forge-latest-automated-pr-branch
      (gethash 'apinatomy-models *repos*))
-    (repo-remote-push (gethash 'apinatomy-models *repos*))
+    (repo-push (gethash 'apinatomy-models *repos*))
 
     #+()
     (progn
+      (setf *pr-branch-prefix* "auto-test-")
+      (setf *repo-working-dir* #p"/tmp/test-2-prcl-build-dir/test-github-api/")
       (setf *forge-user* "tgbugs-build")
       (setf *github-token* (ensure-token-exists)))
+    (setf (gethash 'test-github-api *repos*) nil)
     (defrepo 'test-github-api
       "https://github.com/tgbugs/test-github-api.git")
     (repo-forge-fill-values (gethash 'test-github-api *repos*))
-    (get-latest-automated-pr-branch
+    (car (reverse (repo-pull-requests (gethash 'test-github-api *repos*))))
+    (forge-latest-automated-pr-branch
      (gethash 'test-github-api *repos*))
-    (defvar rp nil)
-    (setf rp (forge-get-repo-push (gethash 'test-github-api *repos*)))
+    (setf *rp* (forge-get-repo-push (gethash 'test-github-api *repos*)))
     ))
 
 (defun github-fork-repo (repo &key fork block)
@@ -638,11 +653,11 @@
   (let* ((source (or source (git-get-upstream-branch (git-get-current-branch))))
          ;; XXX warning, ensure we push creating a new branch
          (target (or target (git-get-upstream-branch (git-master-branch))))
-
-         (head-repo *current-repo*)
+         (base-repo *current-repo*)
+         (head-repo (repo-push *current-repo*))
          (uri-path (concatenate 'string "/repos/"
-                                (repo-owner head-repo) "/"
-                                (repo-name head-repo) "/pulls"))
+                                (repo-owner base-repo) "/"
+                                (repo-name base-repo) "/pulls"))
          (uri (quri:make-uri
                :scheme "https"
                :host "api.github.com"
@@ -653,11 +668,16 @@
          (base-branch (cdr base))
          (head-remote (car head))
          (head-branch (cdr head)))
+    #+debug
+    (format t "debug gcpr: ~a ~a ~a ~a ~a ~a ~%"
+            source target
+            base-remote base-branch head-remote head-branch)
     ;; head source
     ;; base target
     (let ((resp
             (dex:post
              uri
+             :verbose *debug*
              :headers
              `(("Accept" . "application/vnd.github.shadow-cat-preview+json") ; Support draft pull-requests.
                ("Authorization" . ,(concatenate 'string "token " *github-token*)))
@@ -671,6 +691,8 @@
                                (concatenate 'string (repo-owner head-repo) ":" head-branch)))
                 ("draft" . t)
                 ("maintainer_can_modify" . t))))))
+      #+debug
+      (format t "request: ~s~%" resp)
       resp)))
 
 #-dumped-image
@@ -775,15 +797,16 @@ from nil.")
                    :directory *default-pathname-defaults*
                    :output out
                    :error *error-output*
-                   :search t)))
+                   :search t))
+         (output-string (get-output-stream-string out))) ; reminder: `get-output-stream-string' is destructive
     #+debug
     (when *current-git-output-port*
-      (format *current-git-output-port* "git output for git ~a:~%~a" args (get-output-stream-string out)))
+      (format *current-git-output-port* "git output for git ~a:~%~a" args output-string))
     (when (and *git-raise-error* (not (= 0 (sb-ext:process-exit-code process))))
       (error (format nil "git ~s failed with status ~s~%"
                      args
                      (sb-ext:process-exit-code process))))
-    (values (get-output-stream-string out) process)))
+    (values output-string process)))
 
 (defun git-master-branch ()
   ; TODO
@@ -1080,7 +1103,7 @@ from nil.")
       (let* ((source-branch (or old-branch (git-master-branch)))
              (_ (git-stash-checkout-reset source-branch)) ; if not (git-master-branch) won't exist will error
              (branch-prefix-string (or *pr-branch-prefix* branch-prefix-string *pr-branch-prefix-default*))
-             (pr-already-exists (get-latest-automated-pr-branch
+             (pr-already-exists (forge-latest-automated-pr-branch
                                  *current-repo*
                                  :prefix branch-prefix-string))
              (latest-remote-auto-branch (branch-local-name
@@ -1131,7 +1154,15 @@ from nil.")
                         (github-create-pull-request
                          pr-title
                          pr-body
-                         :target (git-get-upstream-branch parent-branch-or-existing))
+                         ;; always target upstream source even if there is a branch on upstream
+                         ;; that matches the auto pull request branch name that shouldn't happen
+                         ;; but if it does as it has during testing, ignore the other auto branch
+                         :source (git-get-upstream-branch parent-branch-or-existing)
+                         :target (git-get-upstream-branch source-branch) ; FIXME EXTREME NAMING CONFUSION  YEAH
+                         ;; source-branch up there means that it will be the target for the pull request
+                         ;; because it is the source we modified and thus want to pull request back to
+                         ;; perspective is everything ... so really need to different names
+                         )
                         ;; TODO print link to pull request so if run by human they can click
                         )
                       ;; note that we only run checkout back to master when
