@@ -45,4 +45,4 @@ sbcl --load "${0}" --eval "(main)" --quit --end-toplevel-options "${@:1}"; exit
 ;; slad MUST be called after build because prcl package must exist when slad is called
 (save-lisp-and-die
  "bin/prcl" ; FIXME running this from another directory will break things
- :toplevel #'prcl:main :executable t :compression t)
+ :toplevel #'prcl:main :executable t :compression t) ; set :compression 22 for max zstd compression
