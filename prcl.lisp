@@ -337,7 +337,8 @@
   ;; FIXME make sure the pull request is open!
   ;; FIXME this will pretty much only work for github
   (let* ((prefix (or prefix *pr-branch-prefix* *pr-branch-prefix-default*))
-         (push-owner (repo-owner (repo-push repo)))
+         (repo-push (repo-push repo))
+         (push-owner (and repo-push (repo-owner repo-push))) ; avoid type error on nil struct
          (expect-label-prefix (concatenate 'string push-owner ":" prefix))
          out)
     #+debug
@@ -883,8 +884,9 @@ from nil.")
 
 ;;(define-condition continue-from-git-error (condition) ()) ; not needed, *git-raise-error* nil better
 (defun git-stash-checkout-reset (&optional branch)
-  (let ((branch (or branch (git-master-branch)))
-        (upstream-branch (concatenate 'string (git-push-remote) "/" branch)))
+  (let* ((branch (or branch (git-master-branch)))
+         (is-set-remote (git-config "branch" branch "remote"))
+         (upstream-branch (concatenate 'string (or (git-push-remote) (and *no-auth* (car is-set-remote))) "/" branch)))
     (when (or (git-diff) (git-ls-others))
       (git-stash-both))
     (run-git "checkout" branch)
@@ -934,9 +936,9 @@ from nil.")
 (defun git-log-p-n-1 ()
   (run-git "log" "-p" "-n" "1" "--color=always" "--word-diff" "--patience"))
 
-(defun git-checkout-create (branch)
+(defun git-checkout-create (branch &key force)
   ;; XXX check this one
-  (run-git "checkout" "-b" branch))
+  (run-git "checkout" (if force "-B" "-b") branch))
 
 (defun git-add (&rest paths)
   (run-git "add" "--" paths))
@@ -992,8 +994,10 @@ from nil.")
 (defun git-push (&key dry-run)
   ;; FIXME reminder that there may be distinct push and pull urls
   (let* ((branch (git-get-current-branch))
-         (is-set-remote (git-config "branch" branch "remote"))
-         (remote (or is-set-remote (git-push-remote)))) ; XXX TODO other remote ??? or did pushurl fix it?
+         (is-set-remote (car (git-config "branch" branch "remote")))
+         (remote (or is-set-remote  ; XXX TODO other remote ??? or did pushurl fix it?
+                     (git-push-remote)
+                     (and dry-run (car (git-config "branch" (git-master-branch) "remote"))))))
     (if is-set-remote
         (run-git "push" (and dry-run "--dry-run"))
         (progn
@@ -1001,6 +1005,8 @@ from nil.")
           ;; we mostly use ssh access for git operations, but we need the token for api access
           ;; all the robots already have ssh keys that we can use for this stuff (mostly)
           ;; though having the access token might simplify operations? at least for github?
+          (unless remote
+            (error "No remote for ~a. This would go badly." branch))
           (run-git "push" (and dry-run "--dry-run") "-v" "--set-upstream" remote branch)))))
 
 (defun git-get-upstream-branch (&optional branch)
@@ -1044,10 +1050,11 @@ from nil.")
   ;; I understand why this is an easier way to ensure that we have the repo we want present
   `(let* ((repo (gethash repo-id *repos*))
           (_ (unless repo (error (format nil "foo: ~s~%" repo-id))))
+          #+debug
           (__ (format t "repo-struct: ~s~%" repo))
           (*repo-working-dir* (repo-local-path repo))
           just-cloned)
-     (declare (ignore _) (ignore __))
+     (declare (ignore _) #+debug (ignore __))
      (unless (uiop:directory-exists-p *repo-working-dir*)
        ,(if *do-not-clone*
             '(error (format nil "not cloned and :no-clone is set, could clone to ~s~%" *repo-working-dir*))
@@ -1137,7 +1144,10 @@ from nil.")
               (progn
                 (format t "adding ...~%    ~{~a~^~%    ~}~%" files-to-add) ; last ~% avoids wierd error print
                 (unless (or pr-already-exists latest-remote-auto-branch)
-                  (git-checkout-create target-branch)) ; checkout first so failsafe on branch
+                  ;; checkout first so failsafe on branch
+                  ;; XXX hit up the reflog if something goes wrong
+                  ;; XXX yet another reason to never use this on working repos
+                  (git-checkout-create target-branch :force t))
                 (git-add files-to-add)
                 (git-commit (format nil "~a~%~%~a" pr-title (or pr-body "")))
                 (format t "~a~%~a~%~a~%" *sepstr* (git-log-p-n-1) *sepstr*)
