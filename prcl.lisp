@@ -327,6 +327,8 @@
   local)
 
 (defun defrepo (id remote &key local)
+  ;; TODO somewhere in here we need to check, detect, warn, and
+  ;; possibly change if the remote provided does not match the config
   (let ((repo (make-repo :id id :remote remote)))
     (when local
       (setf (repo-local repo) (repo-local-validate local)))
@@ -885,8 +887,14 @@ from nil.")
 ;;(define-condition continue-from-git-error (condition) ()) ; not needed, *git-raise-error* nil better
 (defun git-stash-checkout-reset (&optional branch)
   (let* ((branch (or branch (git-master-branch)))
-         (is-set-remote (git-config "branch" branch "remote"))
-         (upstream-branch (concatenate 'string (or (git-push-remote) (and *no-auth* (car is-set-remote))) "/" branch)))
+         (is-set-remote (car (git-config "branch" branch "remote")))
+         (upstream-remote
+           (or is-set-remote
+               (git-push-remote) ; fail over to the master remote i.e. usually origin
+               ;; XXX there is probably a correct way to find the possible remotes for an ambiguous branch
+               ;; but for now just go with whatever master is mapped to
+               (car (git-config "branch" (git-master-branch) "remote"))))
+         (upstream-branch (concatenate 'string upstream-remote "/" branch)))
     (when (or (git-diff) (git-ls-others))
       (git-stash-both))
     (run-git "checkout" branch)
