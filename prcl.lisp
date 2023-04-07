@@ -70,6 +70,7 @@
    #:*build-dir*
    #:*oa-secrets*
    #:*subprocess-environment*
+   #:*just-fun*
 
    #:run-command
    #:run-command-check
@@ -118,6 +119,16 @@
   )
 (defvar *no-auth* nil)
 (defvar *debug*)
+(defvar *just-fun* nil
+  "return only the :fn keyword argument from `defsync' forms, useful for
+debug or use in place if a lambda is used instead of passing a
+function name for a process defined elsewhere, e.g. use as follows
+
+(funcall (let (*build-id* (*just-fun* t)) (sync-fun-name)))
+
+or if you haven't changed directory in slime ,cd<return>
+
+(funcall (let (*build-id* (*just-fun* t) (*default-pathname-defaults* #p\"path/to/repo\")) (sync-fun-name)))")
 #+swank ; make testing and development easier
 (setf *debug* nil)
 (defvar *git-raise-error* nil)
@@ -1111,9 +1122,10 @@ from nil.")
        ((:get-add-files get-add-files) #'identity)
        ((:title pr-title))
        ((:body pr-body)))
-    (unless repo-id (error ":repo-id is a required argument"))
-    (unless command-fun (error ":fn is a required argument"))
-    (with-repo ; repo-id ; XXX possibly bad design but we don't need repo-id because cl is not hygenic ...
+  (unless repo-id (error ":repo-id is a required argument"))
+  (unless command-fun (error ":fn is a required argument"))
+  (when *just-fun* (return-from defsync command-fun))
+  (with-repo ; repo-id ; XXX possibly bad design but we don't need repo-id because cl is not hygenic ...
       ; :no-clone t
       (let* ((source-branch (or old-branch (git-master-branch)))
              (_ (git-stash-checkout-reset source-branch)) ; if not (git-master-branch) won't exist will error
