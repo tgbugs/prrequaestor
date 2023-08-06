@@ -1266,7 +1266,7 @@ from nil.")
          (*pr-branch-prefix* pr-branch-prefix)
          (*git-raise-error* t)
          *current-sync*)
-     (ensure-directories-exist *build-dir*)
+     (ensure-directories-exist *build-dir* :mode #o755)
      (if (or (and *sync-specs* cli-current-sync) (uiop:string-prefix-p "test" cli-current-sync))
          (let ((fun (intern (string-upcase (concatenate 'string "sync-" cli-current-sync)) 'prcl-sync)))
            (when *sync-specs*
@@ -1298,6 +1298,7 @@ from nil.")
     ))
 
 (defrepo 'test-github-api "https://github.com/tgbugs/test-github-api.git")
+
 (defun sync-test-2 ()
   #+debug
   (format *standard-output* "HAWYEE ??????~%")
