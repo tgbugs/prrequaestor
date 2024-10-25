@@ -17,6 +17,15 @@ sbcl --load "${0}" --eval "(main)" --quit --end-toplevel-options "${@:1}"; exit
   (when (probe-file quicklisp-init)
     (load quicklisp-init)))
 
+#-dexador
+(asdf:load-system :dexador :verbose nil)
+#-dexador
+(push :dexador *features*)
+#-quicklisp-https-always
+(asdf:load-system :quicklisp-https-always :verbose nil)
+#-quicklisp-https-always
+(push :quicklisp-https-always *features*)
+
 ;; XXX all commands in this must be run at the top level
 ;; so that namespaces can be resolved one form at a time
 ;; you cannot define a function that both loads and references a namespace

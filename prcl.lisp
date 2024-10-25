@@ -47,8 +47,19 @@
   (when (probe-file quicklisp-init)
     (load quicklisp-init)))
 
+#-dumped-image
+(progn
+  #-dexador
+  (asdf:load-system :dexador :verbose nil)
+  #-dexador
+  (push :dexador *features*)
+  #-quicklisp-https-always
+  (asdf:load-system :quicklisp-https-always :verbose nil)
+  #-quicklisp-https-always
+  (push :quicklisp-https-always *features*))
+
 #-dumped-image (ql:quickload 'local-time)
-#-dumped-image (ql:quickload 'dexador)
+;;#-dumped-image (ql:quickload 'dexador) ; must fetch dex using ql-https first so only asdf:load-system dex
 ;;#-dumped-image (ql:quickload 'cl-git)
 #-dumped-image (ql:quickload 'cl-json)
 #-dumped-image (ql:quickload 'quri)
